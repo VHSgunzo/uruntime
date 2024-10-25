@@ -23,6 +23,6 @@ cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-op
 mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-appimage-x86_64
 echo -ne 'AI\x02'|dd of=uruntime-appimage-x86_64 bs=1 count=3 seek=8 conv=notrunc
 ```
-See [Build step in ci.yml](https://github.com/VHSgunzo/uruntime/blob/main/.github/workflows/ci.yml#L28)
+See [Build step in ci.yml](https://github.com/VHSgunzo/uruntime/blob/main/.github/workflows/ci.yml#L34)
 
 * Or take an already precompiled from the [releases](https://github.com/VHSgunzo/uruntime/releases)
