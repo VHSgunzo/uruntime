@@ -97,10 +97,10 @@ jobs:
       - name: Add magic
         run: >
           echo ==============================================RI==============================================;
-          ls -1 uruntime-runimage*|xargs -I {} sh -c "echo -ne 'RI\x02'|dd of={} bs=1 count=3 seek=8 conv=notrunc";
+          ls -1 uruntime-runimage*|xargs -I {} sh -c 'echo -ne "RI\x02"|dd of={} bs=1 count=3 seek=8 conv=notrunc';
 
           echo ==============================================AI==============================================;
-          ls -1 uruntime-appimage*|xargs -I {} sh -c "echo -ne 'AI\x02'|dd of={} bs=1 count=3 seek=8 conv=notrunc";
+          ls -1 uruntime-appimage*|xargs -I {} sh -c 'echo -ne "AI\x02"|dd of={} bs=1 count=3 seek=8 conv=notrunc';
 
       - name: Release
         uses: softprops/action-gh-release@v1
