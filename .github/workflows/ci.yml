@@ -27,7 +27,7 @@ jobs:
 
       - name: Build
         run: >
-          sudo bash -c 'apt update && apt install binutils musl-tools qemu-user-static -y';
+          sudo bash -c 'apt update && apt install binutils curl musl-tools qemu-user-static -y';
           
           echo ==============================================x86_64==============================================;
           rustup component add rust-src --toolchain nightly;
@@ -85,6 +85,13 @@ jobs:
 
           echo ==============================================strip==============================================;
           strip -s -R .comment -R .gnu.version --strip-unneeded uruntime-*-x86_64 ;
+
+          echo ==============================================RI==============================================;
+          ls -1 uruntime-runimage*|xargs -I {} sh -c "echo -ne 'RI\x02'|dd of={} bs=1 count=3 seek=8 conv=notrunc"
+
+          echo ==============================================AI==============================================;
+          ls -1 uruntime-appimage*|xargs -I {} sh -c "echo -ne 'AI\x02'|dd of={} bs=1 count=3 seek=8 conv=notrunc"
+         
 
       # - name: Build archlinux package
       #   uses: countstarlight/arch-makepkg-action@master

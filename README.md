@@ -16,10 +16,12 @@ rustup component add rust-src --toolchain nightly
 # for RunImage x86_64
 cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort
 mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-runimage-x86_64
+echo -ne 'RI\x02'|dd of=uruntime-runimage-x86_64 bs=1 count=3 seek=8 conv=notrunc
 
 # for AppImage x86_64
 cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --features appimage
 mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-appimage-x86_64
+echo -ne 'AI\x02'|dd of=uruntime-appimage-x86_64 bs=1 count=3 seek=8 conv=notrunc
 ```
 See [Build step in ci.yml](https://github.com/VHSgunzo/uruntime/blob/main/.github/workflows/ci.yml#L28)
 

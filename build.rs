@@ -1,11 +1,9 @@
 use std::path::Path;
-use std::process::exit;
 use std::collections::HashMap;
+use std::process::exit;
 use std::{env, process::Command};
 use std::os::unix::fs::{symlink, PermissionsExt};
-use std::fs::{create_dir, metadata, remove_file, set_permissions, write};
-
-use reqwest::blocking::Client;
+use std::fs::{create_dir, metadata, remove_file, set_permissions};
 
 
 fn main() {
@@ -48,44 +46,35 @@ fn main() {
         let asset_upx_path = assets_path.join(format!("{asset}-upx"));
 
         if !asset_path.exists() {
-            let url = assets.get(asset).unwrap();
-            let client = Client::builder()
-                .danger_accept_invalid_certs(true)
-                .timeout(None)
-                .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15")
-                .build()
-                .unwrap();
+            let output = Command::new("curl").args([
+                "--insecure",
+                "-A", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+                "-L", assets.get(asset).unwrap(),
+                "-o", asset_path.to_str().unwrap()
+            ]).output().expect(&format!("Failed to execute curl: {asset}"));
 
-            match client.get(url).send() {
-                Ok(data) => {
-                    write(&asset_path, &data.bytes().unwrap().to_vec())
-                        .expect("Failed to write asset: {asset}");
-
-                    let mut permissions = metadata(&asset_path)
-                        .expect("Unable to read metadata")
-                        .permissions();
-                    permissions.set_mode(0o755);
-                    set_permissions(&asset_path, permissions)
-                        .expect("Unable to set permissions");
-                }
-                Err(err) => {
-                    eprintln!("Failed to get asset: {asset}: {err}");
-                    exit(1)
-                }
+            if !output.status.success() {
+                eprintln!("Failed to get asset: {}", String::from_utf8_lossy(&output.stderr));
+                exit(1)
             }
-            drop(client)
+
+            let mut permissions = metadata(&asset_path)
+                .expect(&format!("Unable to read metadata: {asset}")).permissions();
+            permissions.set_mode(0o755);
+            set_permissions(&asset_path, permissions)
+                .expect(&format!("Unable to set permissions: {asset}"));
         }
 
-        if asset_path != upx && !asset_upx_path.exists() {
-            println!("upx: {}", upx.display());
+        if !asset.ends_with("upx") && !asset_upx_path.exists() {
             let output = Command::new(&upx).args([
                 "--force-overwrite", "-9", "--best", 
                 asset_path.to_str().unwrap(), "-o", 
                 asset_upx_path.to_str().unwrap()
-            ]).output().expect("Failed to execute upx command!");
+            ]).output().expect(&format!("Failed to execute upx: {asset}"));
 
             if !output.status.success() {
-                eprintln!("Error upxing the asset binary: {}", String::from_utf8_lossy(&output.stderr));
+                eprintln!("Failed to upx asset: {}", String::from_utf8_lossy(&output.stderr));
+                exit(1)
             }
         }
     }

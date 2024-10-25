@@ -27,9 +27,6 @@ squashfs = []
 appimage = []
 pie-ulexec = ["dep:userland-execve"]
 
-[build-dependencies]
-reqwest = { version = "0.12.8", features = ["blocking", "native-tls-vendored"] }
-
 [dependencies]
 which = "6.0.3"
 cfg-if = "1.0.0"
