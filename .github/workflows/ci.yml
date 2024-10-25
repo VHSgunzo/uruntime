@@ -32,37 +32,33 @@ jobs:
           cargo install cross;
 
       - name: Build x86_64
-        uses: nick-fields/retry@v2
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          command: >
-            echo ==============================================x86_64==============================================;
-            cargo clean;
+        run: >
+          echo ==============================================x86_64==============================================;
+          cargo clean;
 
-            echo runimage;
-            cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort;
-            mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-runimage-x86_64;
+          echo runimage;
+          cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort
+          mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-runimage-x86_64;
 
-            echo runimage-squashfs;
-            cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --no-default-features --features squashfs;
-            mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-runimage-squashfs-x86_64;
+          echo runimage-squashfs;
+          cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --no-default-features --features squashfs;
+          mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-runimage-squashfs-x86_64;
 
-            echo runimage-dwarfs;
-            cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --no-default-features --features dwarfs;
-            mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-runimage-dwarfs-x86_64;
+          echo runimage-dwarfs;
+          cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --no-default-features --features dwarfs;
+          mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-runimage-dwarfs-x86_64;
 
-            echo appimage;
-            cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --features appimage;
-            mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-appimage-x86_64;
+          echo appimage;
+          cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --features appimage;
+          mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-appimage-x86_64;
 
-            echo appimage-squashfs;
-            cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --no-default-features --features appimage,squashfs;
-            mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-appimage-squashfs-x86_64;
+          echo appimage-squashfs;
+          cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --no-default-features --features appimage,squashfs;
+          mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-appimage-squashfs-x86_64;
 
-            echo appimage-dwarfs;
-            cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --no-default-features --features appimage,dwarfs;
-            mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-appimage-dwarfs-x86_64;
+          echo appimage-dwarfs;
+          cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --no-default-features --features appimage,dwarfs;
+          mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-appimage-dwarfs-x86_64;
 
       - name: Strip x86_64
         run: >
@@ -70,37 +66,33 @@ jobs:
           strip -s -R .comment -R .gnu.version --strip-unneeded uruntime-*-x86_64 ;
 
       - name: Build aarch64
-        uses: nick-fields/retry@v2
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          command: >
-            echo ==============================================aarch64==============================================;
-            cargo clean;
+        run: >
+          echo ==============================================aarch64==============================================;
+          cargo clean;
 
-            echo runimage;
-            cross build --release --target aarch64-unknown-linux-musl;
-            mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-runimage-aarch64;
+          echo runimage;
+          cross build --release --target aarch64-unknown-linux-musl;
+          mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-runimage-aarch64;
 
-            echo runimage-squashfs;
-            cross build --release --target aarch64-unknown-linux-musl --no-default-features --features squashfs;
-            mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-runimage-squashfs-aarch64;
+          echo runimage-squashfs;
+          cross build --release --target aarch64-unknown-linux-musl --no-default-features --features squashfs;
+          mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-runimage-squashfs-aarch64;
 
-            echo runimage-dwarfs;
-            cross build --release --target aarch64-unknown-linux-musl --no-default-features --features dwarfs;
-            mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-runimage-dwarfs-aarch64;
+          echo runimage-dwarfs;
+          cross build --release --target aarch64-unknown-linux-musl --no-default-features --features dwarfs;
+          mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-runimage-dwarfs-aarch64;
 
-            echo appimage;
-            cross build --release --target aarch64-unknown-linux-musl --features appimage;
-            mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-appimage-aarch64;
+          echo appimage;
+          cross build --release --target aarch64-unknown-linux-musl --features appimage;
+          mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-appimage-aarch64;
 
-            echo appimage-squashfs;
-            cross build --release --target aarch64-unknown-linux-musl --no-default-features --features appimage,squashfs;
-            mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-appimage-squashfs-aarch64;
+          echo appimage-squashfs;
+          cross build --release --target aarch64-unknown-linux-musl --no-default-features --features appimage,squashfs;
+          mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-appimage-squashfs-aarch64;
 
-            echo appimage-dwarfs;
-            cross build --release --target aarch64-unknown-linux-musl --no-default-features --features appimage,dwarfs;
-            mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-appimage-dwarfs-aarch64;
+          echo appimage-dwarfs;
+          cross build --release --target aarch64-unknown-linux-musl --no-default-features --features appimage,dwarfs;
+          mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-appimage-dwarfs-aarch64;
 
       - name: Add magic
         run: >

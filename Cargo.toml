@@ -27,6 +27,9 @@ squashfs = []
 appimage = []
 pie-ulexec = ["dep:userland-execve"]
 
+[build-dependencies]
+indexmap = "2.6.0"
+
 [dependencies]
 which = "6.0.3"
 cfg-if = "1.0.0"
