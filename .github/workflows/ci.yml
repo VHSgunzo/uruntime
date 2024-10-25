@@ -25,13 +25,15 @@ jobs:
           override: true
           target: x86_64-unknown-linux-musl
 
-      - name: Build
+      - name: Install deps
         run: >
           sudo bash -c 'apt update && apt install binutils curl musl-tools qemu-user-static -y';
-          
-          echo ==============================================x86_64==============================================;
           rustup component add rust-src --toolchain nightly;
-          
+          cargo install cross;
+
+      - name: Build
+        run: >
+          echo ==============================================x86_64==============================================;
           echo runimage;
           cargo +nightly build --release --target x86_64-unknown-linux-musl -Z unstable-options -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort;
           mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-runimage-x86_64;
@@ -57,8 +59,6 @@ jobs:
           mv target/x86_64-unknown-linux-musl/release/uruntime uruntime-appimage-dwarfs-x86_64;
 
           echo ==============================================aarch64==============================================;
-          cargo install cross;
-
           echo runimage;
           cross build --release --target aarch64-unknown-linux-musl;
           mv target/aarch64-unknown-linux-musl/release/uruntime uruntime-runimage-aarch64;
@@ -91,12 +91,6 @@ jobs:
 
           echo ==============================================AI==============================================;
           ls -1 uruntime-appimage*|xargs -I {} sh -c "echo -ne 'AI\x02'|dd of={} bs=1 count=3 seek=8 conv=notrunc"
-         
-
-      # - name: Build archlinux package
-      #   uses: countstarlight/arch-makepkg-action@master
-      #   with:
-      #     scripts: "makepkg -fsCc --noconfirm"
 
       - name: Release
         uses: softprops/action-gh-release@v1
