@@ -482,6 +482,10 @@ fn try_set_portable(kind: &str, dir: &PathBuf) {
                 println!("Setting $XDG_CONFIG_HOME to {:?}", dir);
                 env::set_var("XDG_CONFIG_HOME", dir)
             }
+            "share" => {
+                println!("Setting $XDG_DATA_HOME to {:?}", dir);
+                env::set_var("XDG_DATA_HOME", dir)
+            }
             _ => {}
         }
     }
