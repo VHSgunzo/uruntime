@@ -98,6 +98,8 @@ See [Build step in ci.yml](https://github.com/VHSgunzo/uruntime/blob/main/.githu
       RUNTIME_EXTRACT_AND_RUN=1      Run the RunImage afer extraction without using FUSE
       NO_CLEANUP=1                   Do not clear the unpacking directory after closing when
                                        using extract and run option for reuse extracted data
+      NO_UNMOUNT=1                   Do not unmount the mount directory after closing 
+                                      for reuse mount point
       TMPDIR=/path                   Specifies a custom path for mounting or extracting the image
       FUSERMOUNT_PROG=/path          Specifies a custom path for fusermount
       DWARFS_WORKERS=2               Number of worker threads for DwarFS (default: equal CPU threads)
@@ -156,10 +158,47 @@ See [Build step in ci.yml](https://github.com/VHSgunzo/uruntime/blob/main/.githu
       APPIMAGE_EXTRACT_AND_RUN=1     Run the AppImage afer extraction without using FUSE
       NO_CLEANUP=1                   Do not clear the unpacking directory after closing when
                                        using extract and run option for reuse extracted data
+      NO_UNMOUNT=1                   Do not unmount the mount directory after closing 
+                                      for reuse mount point
       TMPDIR=/path                   Specifies a custom path for mounting or extracting the image
       FUSERMOUNT_PROG=/path          Specifies a custom path for fusermount
       TARGET_APPIMAGE=/path          Operate on a target AppImage rather than this file itself
       DWARFS_WORKERS=2               Number of worker threads for DwarFS (default: equal CPU threads)
       DWARFS_CACHESIZE=512M          Size of the block cache, in bytes for DwarFS (suffixes K, M, G)
       DWARFS_BLOCKSIZE=512K          Size of the block file I/O, in bytes for DwarFS (suffixes K, M, G)
+```
+
+### **Built-in configuration:**
+You can change the startup logic by changing the built-in uruntime parameters.
+* `URUNTIME_EXTRACT` - Specifies the logic of extracting or mounting
+```
+# URUNTIME_EXTRACT=0 - FUSE mounting only
+sed -i 's|URUNTIME_EXTRACT=[0-9]|URUNTIME_EXTRACT=0|' /path/uruntime
+
+# URUNTIME_EXTRACT=1 - Do not use FUSE mounting, but extract and run
+sed -i 's|URUNTIME_EXTRACT=[0-9]|URUNTIME_EXTRACT=1|' /path/uruntime
+
+# URUNTIME_EXTRACT=2 - Try to use FUSE mounting and if it is unavailable extract and run
+sed -i 's|URUNTIME_EXTRACT=[0-9]|URUNTIME_EXTRACT=2|' /path/uruntime
+
+# URUNTIME_EXTRACT=3 - As above, but if the image size is less than 350 MB (default)
+sed -i 's|URUNTIME_EXTRACT=[0-9]|URUNTIME_EXTRACT=3|' /path/uruntime
+```
+
+* `URUNTIME_CLEANUP` - Specifies the logic of cleanup after extract and run
+```
+# URUNTIME_CLEANUP=0 - Disable extracting directory cleanup
+sed -i 's|URUNTIME_CLEANUP=[0-9]|URUNTIME_CLEANUP=0|' /path/uruntime
+
+# URUNTIME_CLEANUP=1 - Enable extracting directory cleanup (default)
+sed -i 's|URUNTIME_CLEANUP=[0-9]|URUNTIME_CLEANUP=1|' /path/uruntime
+```
+
+* `URUNTIME_MOUNT` - Specifies the mount logic
+```
+# URUNTIME_MOUNT=0 - Disable unmounting of the mount directory for reuse mount point
+sed -i 's|URUNTIME_MOUNT=[0-9]|URUNTIME_MOUNT=0|' /path/uruntime
+
+# URUNTIME_MOUNT=1 - Enable unmounting of the mount directory (default)
+sed -i 's|URUNTIME_MOUNT=[0-9]|URUNTIME_MOUNT=1|' /path/uruntime
 ```
