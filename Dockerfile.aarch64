@@ -1,0 +1,3 @@
+FROM ghcr.io/cross-rs/aarch64-unknown-linux-musl:latest
+ARG TARGETARCH
+RUN curl -L https://github.com/upx/upx/releases/download/v5.0.0/upx-5.0.0-${TARGETARCH}_linux.tar.xz|tar -xJf - -C /usr/local/bin --strip-components=1 --wildcards "*/upx"

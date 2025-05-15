@@ -23,22 +23,20 @@ fn main() {
 fn try_main() -> Result<(), DynError> {
     let all_bins = vec![
         "runimage-x86_64",
-        "runimage-squashfs-x86_64",
-        "runimage-dwarfs-x86_64",
         "appimage-x86_64",
         "appimage-lite-x86_64",
         "appimage-squashfs-x86_64",
         "appimage-squashfs-lite-x86_64",
         "appimage-dwarfs-x86_64",
+        "appimage-dwarfs-lite-x86_64",
 
         "runimage-aarch64",
-        "runimage-squashfs-aarch64",
-        "runimage-dwarfs-aarch64",
         "appimage-aarch64",
         "appimage-lite-aarch64",
         "appimage-squashfs-aarch64",
         "appimage-squashfs-lite-aarch64",
         "appimage-dwarfs-aarch64",
+        "appimage-dwarfs-lite-aarch64",
     ];
     let arg = env::args().nth(1).unwrap_or_else(||{
         "".into()
@@ -83,20 +81,22 @@ fn print_help() {
     runimage-squashfs-x86_64         build x86_64 RunImage uruntime (SquashFS-only)
     runimage-dwarfs-x86_64           build x86_64 RunImage uruntime (DwarFS-only)
     appimage-x86_64                  build x86_64 AppImage uruntime
-    appimage-lite-x86_64             build x86_64 AppImage uruntime (no mksquashfs)
+    appimage-lite-x86_64             build x86_64 AppImage uruntime (no dwarfsck, mkdwarfs, mksquashfs, sqfstar)
     appimage-squashfs-x86_64         build x86_64 AppImage uruntime (SquashFS-only)
-    appimage-squashfs-lite-x86_64    build x86_64 AppImage uruntime (SquashFS-only no mksquashfs)
+    appimage-squashfs-lite-x86_64    build x86_64 AppImage uruntime (SquashFS-only no mksquashfs, sqfstar)
     appimage-dwarfs-x86_64           build x86_64 AppImage uruntime (DwarFS-only)
+    appimage-dwarfs-lite-x86_64      build x86_64 AppImage uruntime (DwarFS-only no dwarfsck, mkdwarfs)
 
     aarch64                          build aarch64 RunImage and AppImage uruntime
     runimage-aarch64                 build aarch64 RunImage uruntime
     runimage-squashfs-aarch64        build aarch64 RunImage uruntime (SquashFS-only)
     runimage-dwarfs-aarch64          build aarch64 RunImage uruntime (DwarFS-only)
     appimage-aarch64                 build aarch64 AppImage uruntime
-    appimage-lite-aarch64            build aarch64 AppImage uruntime (no mksquashfs)
+    appimage-lite-aarch64            build aarch64 AppImage uruntime (no dwarfsck, mkdwarfs, mksquashfs, sqfstar)
     appimage-squashfs-aarch64        build aarch64 AppImage uruntime (SquashFS-only)
-    appimage-squashfs-lite-aarch64   build aarch64 AppImage uruntime (SquashFS-only no mksquashfs)
+    appimage-squashfs-lite-aarch64   build aarch64 AppImage uruntime (SquashFS-only no mksquashfs, sqfstar)
     appimage-dwarfs-aarch64          build aarch64 AppImage uruntime (DwarFS-only)
+    appimage-dwarfs-lite-aarch64     build aarch64 AppImage uruntime (DwarFS-only no dwarfsck, mkdwarfs)
 
     all                              build all of the above")
 }
@@ -216,9 +216,12 @@ fn build(bin: &str) -> Result<(), DynError> {
         magic = "AI";
         build_args.append(&mut vec!["--features", "appimage"])
     }
-    if !bin.contains("lite") && !bin.contains("dwarfs") {
-        build_args.append(&mut vec!["--features", "mksquashfs"]);
+    if bin.contains("lite") {
+        build_args.append(&mut vec!["--features", "lite"]);
     }
+
+    let upx = env::args().nth(2).unwrap_or_default().to_lowercase() == "--upx";
+    if upx { build_args.append(&mut vec!["--features", "upx"]) }
 
     let status = Command::new(cargo)
         .current_dir(project_root())
@@ -235,7 +238,11 @@ fn build(bin: &str) -> Result<(), DynError> {
         .join("release")
         .join(BIN_NAME);
 
-    let dst_bin_name = &format!("{BIN_NAME}-{bin}");
+    let dst_bin_name = if upx {
+        &format!("{BIN_NAME}-{bin}-upx")
+    } else {
+        &format!("{BIN_NAME}-{bin}")
+    };
     let dst = dist_dir().join(dst_bin_name);
 
     rename(&src, &dst)?;
