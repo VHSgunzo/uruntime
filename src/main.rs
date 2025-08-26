@@ -715,14 +715,39 @@ fn try_set_portable(kind: &str, dir: &PathBuf) {
     if dir.is_dir() {
         match kind {
             "home" => {
+                if get_env_var("REAL_HOME").is_empty() {
+                    if let Ok(real_homedir) = env::var("HOME") {
+                        env::set_var("REAL_HOME", real_homedir);
+                    }
+                }
                 eprintln!("Setting $HOME to {:?}", dir);
                 env::set_var("HOME", dir)
             }
             "config" => {
+                if get_env_var("REAL_XDG_CONFIG_HOME").is_empty() {
+                    if let Ok(real_configdir) = env::var("XDG_CONFIG_HOME") {
+                        env::set_var("REAL_XDG_CONFIG_HOME", real_configdir);
+                    } else {
+                        if let Ok(home) = env::var("HOME") {
+                            let default_configdir = PathBuf::from(home).join(".config");
+                            env::set_var("REAL_XDG_CONFIG_HOME", default_configdir);
+                        }
+                    }
+                }
                 eprintln!("Setting $XDG_CONFIG_HOME to {:?}", dir);
                 env::set_var("XDG_CONFIG_HOME", dir)
             }
             "share" => {
+                if get_env_var("REAL_XDG_DATA_HOME").is_empty() {
+                    if let Ok(real_sharedir) = env::var("XDG_DATA_HOME") {
+                        env::set_var("REAL_XDG_DATA_HOME", real_sharedir);
+                    } else {
+                        if let Ok(home) = env::var("HOME") {
+                            let default_sharedir = PathBuf::from(home).join(".local").join("share");
+                            env::set_var("REAL_XDG_DATA_HOME", default_sharedir);
+                        }
+                    }
+                }
                 eprintln!("Setting $XDG_DATA_HOME to {:?}", dir);
                 env::set_var("XDG_DATA_HOME", dir)
             }
