@@ -183,20 +183,14 @@ fn build(bin: &str) -> Result<(), DynError> {
         cargo = "cross";
         is_strip = false;
         target = TARGET_AARCH64;
-        build_args.append(&mut vec![
-            "build", "--release",
-            "--target", target
-        ])
     } else {
         cargo = "cargo";
         target = TARGET_X86_64;
-        build_args.append(&mut vec![
-            "+nightly", "build", "--release",
-            "--target", target,
-            "-Z", "unstable-options", "-Z", "build-std=std,panic_abort",
-            "-Z", "build-std-features=panic_immediate_abort"
-        ])
     }
+    build_args.append(&mut vec![
+        "build", "--release",
+        "--target", target
+    ]);
 
     if bin.contains("squashfs") {
         build_args.append(&mut vec!["--no-default-features", "--features", "squashfs"]);

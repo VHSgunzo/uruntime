@@ -1,3 +1,5 @@
+cargo-features = ["panic-immediate-abort"]
+
 [package]
 name = "uruntime"
 version = "0.4.6"
@@ -13,6 +15,7 @@ debug  = false
 opt-level = "z"
 strip = "symbols"
 codegen-units = 1
+panic = "immediate-abort"
 
 [profile.dev]
 opt-level = 0

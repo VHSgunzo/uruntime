@@ -594,7 +594,7 @@ fn mount_image(embed: &Embed, image: &Image, mount_dir: PathBuf) {
                 image_path, mount_dir, "-f".into(),
                 "-o".into(), format!("uid={uid},gid={gid}"),
                 "-o".into(), format!("offset={},cachesize={cachesize},workers={workers}", image.offset),
-                "-o".into(), "ro,nodev,tidy_strategy=time,seq_detector=1,cache_files,no_cache_image".into(),
+                "-o".into(), "ro,nodev,tidy_strategy=time,seq_detector=1,cache_files".into(),
                 "-o".into(), format!("blocksize={}", get_dwfs_option("DWARFS_BLOCKSIZE", DWARFS_BLOCKSIZE)),
                 "-o".into(), format!("readahead={}", get_dwfs_option("DWARFS_READAHEAD", DWARFS_READAHEAD)),
             ];
