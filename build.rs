@@ -12,7 +12,7 @@ use indexmap::IndexMap;
 
 
 #[cfg(feature = "dwarfs")]
-const DWARFS_VERSION: &str = "0.14.0";
+const DWARFS_VERSION: &str = "0.14.1";
 #[cfg(feature = "squashfs")]
 const SQUASHFS_TOOLS_VERSION: &str = "4.7.2";
 #[cfg(feature = "squashfs")]

@@ -1,8 +1,8 @@
 use std::{
-    str, path::PathBuf,
     thread::{sleep, spawn},
     process::{exit, Command},
     env::{self, current_exe},
+    str, path::{PathBuf, Path},
     time::{self, Duration, Instant},
     hash::{DefaultHasher, Hash, Hasher},
     io::{Error, ErrorKind::{NotFound, InvalidData}, Read, Write, Result, Seek, SeekFrom},
@@ -15,9 +15,9 @@ use cfg_if::cfg_if;
 use xxhash_rust::xxh3::xxh3_64;
 use goblin::elf::{Elf, SectionHeader};
 use memfd_exec::{MemFdExecutable, Stdio};
-use nix::{libc, sys::{wait::waitpid, signal::{Signal, kill}}};
 use nix::unistd::{access, fork, setsid, getcwd, AccessFlags, ForkResult, Pid};
 use signal_hook::{consts::{SIGINT, SIGTERM, SIGQUIT, SIGHUP}, iterator::Signals};
+use nix::{libc, sys::{wait::waitpid, signal::{Signal, kill}}, mount::umount, errno::Errno};
 
 const URUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 const URUNTIME_MOUNT: &str = "URUNTIME_MOUNT=3";
@@ -216,49 +216,42 @@ fn add_to_path(path: &PathBuf) {
     }
 }
 
-fn check_fuse() -> bool {
-    let mut is_fusermount = true;
-    let tmp_path_dir = &PathBuf::from("/tmp/.path");
-    if tmp_path_dir.is_dir() {
-        add_to_path(tmp_path_dir)
-    }
-    let fusermount_prog = &get_env_var("FUSERMOUNT_PROG");
-    if PathBuf::from(fusermount_prog).is_file() {
+fn check_fuse(uruntime: &Path, uid: u32) -> bool {
+    fn create_fusermount_dir(tmp_path_dir: &PathBuf) -> bool {
         if !tmp_path_dir.is_dir() {
             if let Err(err) = create_dir_all(tmp_path_dir) {
-                eprintln!("Failed to create fusermount PATH dir: {err}: {:?}", tmp_path_dir);
-                exit(1)
+                eprintln!("Failed to create fusermount dir: {err}: {:?}", tmp_path_dir);
+                return false;
             }
             add_to_path(tmp_path_dir);
         }
-        let fsmntlink_path = tmp_path_dir.join(basename(fusermount_prog));
+        true
+    }
+    fn create_fusermount_symlink(tmp_path_dir: &Path, fusermount_path: &str, fusermount_name: &str) -> bool {
+        let fsmntlink_path = tmp_path_dir.join(fusermount_name);
         let _ = remove_file(&fsmntlink_path);
-        if let Err(err) = symlink(fusermount_prog, &fsmntlink_path) {
+        if let Err(err) = symlink(fusermount_path, &fsmntlink_path) {
             eprintln!("Failed to create fusermount symlink: {err}: {:?}", fsmntlink_path);
-            exit(1)
+            return false;
         }
+        true
+    }
+    let mut is_fusermount = true;
+    let fusermount_list = ["fusermount", "fusermount3"];
+    let tmp_path_dir = &PathBuf::from(format!("/tmp/.path{uid}"));
+    if tmp_path_dir.is_dir() { add_to_path(tmp_path_dir) }
+    let fusermount_prog = &get_env_var("FUSERMOUNT_PROG");
+    if PathBuf::from(fusermount_prog).is_file() {
+        if !create_fusermount_dir(tmp_path_dir) { exit(1) }
+        if !create_fusermount_symlink(tmp_path_dir, fusermount_prog, &basename(fusermount_prog)) { exit(1) }
     } else {
-        for fusermount in ["fusermount", "fusermount3"] {
-            let fallback: &str = if fusermount.ends_with("3") {
-                "fusermount"
-            } else {
-                "fusermount3"
-            };
+        for fusermount in fusermount_list {
+            let fallback: &str = if fusermount.ends_with("3")
+                { "fusermount" } else { "fusermount3" };
             if which(fusermount).is_err() {
                 if let Ok(fusermount_path) = which(fallback) {
-                    if !tmp_path_dir.is_dir() {
-                        if let Err(err) = create_dir_all(tmp_path_dir) {
-                            eprintln!("Failed to create fusermount fallback dir: {err}: {:?}", tmp_path_dir);
-                            break
-                        }
-                    }
-                    let fsmntlink_path = tmp_path_dir.join(fusermount);
-                    let _ = remove_file(&fsmntlink_path);
-                    if let Err(err) = symlink(fusermount_path, &fsmntlink_path) {
-                        eprintln!("Failed to create fusermount fallback symlink: {err}: {:?}", tmp_path_dir);
-                        break
-                    }
-                    add_to_path(tmp_path_dir);
+                    if !create_fusermount_dir(tmp_path_dir) { break }
+                    if !create_fusermount_symlink(tmp_path_dir, &fusermount_path.to_string_lossy(), fusermount) { break }
                     break
                 } else {
                     is_fusermount = false
@@ -266,8 +259,14 @@ fn check_fuse() -> bool {
             }
         }
     }
+    if !is_fusermount {
+        for fusermount in fusermount_list {
+            if !create_fusermount_dir(tmp_path_dir) { break }
+            if !create_fusermount_symlink(tmp_path_dir, &uruntime.to_string_lossy(), fusermount) { break }
+        }
+    }
     if access("/dev/fuse", AccessFlags::R_OK).is_err() ||
-       access("/dev/fuse", AccessFlags::W_OK).is_err() || !is_fusermount {
+       access("/dev/fuse", AccessFlags::W_OK).is_err() {
         return false
     }
     true
@@ -418,10 +417,11 @@ fn basename(path: &str) -> String {
     pieces.first().unwrap().to_string()
 }
 
-fn is_mount_point(path: &PathBuf) -> Result<bool> {
-    let metadata = fs::metadata(path)?;
+fn is_mount_point(path: &Path) -> Result<bool> {
+    let full_path = &path.canonicalize().unwrap_or_default();
+    let metadata = fs::metadata(full_path)?;
     let device_id = metadata.dev();
-    match path.parent() {
+    match full_path.parent() {
         Some(parent) => {
             let parent_metadata = fs::metadata(parent)?;
             Ok(device_id != parent_metadata.dev())
@@ -493,6 +493,61 @@ fn wait_pid_exit(pid: Pid, timeout: Option<Duration>) -> bool {
         sleep(Duration::from_millis(10))
     }
     true
+}
+
+fn try_unmount(fuse_pid: Option<Pid>, mount_point: &Path) -> bool {
+    if !is_mount_point(mount_point).unwrap_or(false)
+        { return false }
+
+    let mut is_busy = false;
+
+    let res = umount(mount_point);
+    if res.is_ok() { return true }
+    else if let Err(e) = res {
+        if e == nix::Error::from(Errno::EBUSY) {
+            is_busy = true
+        }
+    }
+
+    fn handle_command(cmd: &str, args: &Vec<&str>) -> (bool, bool) {
+        let res = Command::new(cmd).args(args).output();
+        if let Ok(output) = res {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stdout.is_empty() { println!("{stdout}") }
+            if !stderr.is_empty() { eprintln!("{stderr}") }
+            return (
+                output.status.success(),
+                stderr.to_ascii_lowercase().contains("busy") || stdout.to_ascii_lowercase().contains("busy")
+            )
+        } else { eprintln!("Failed to execute {cmd}: {}", res.err().unwrap()) }
+        (false, false)
+    }
+
+    let args = vec![mount_point.to_str().unwrap_or_default()];
+    let mut fusermount_args= args.clone();
+    fusermount_args.insert(0, "-u");
+
+    for fusermount in &["fusermount", "fusermount3"] {
+        if is_busy { break }
+        let (success, busy) = handle_command(fusermount, &fusermount_args);
+        if success { return true } else if busy { is_busy = true }
+    }
+
+    if !is_busy {
+        let (success, busy) = handle_command("umount", &args);
+        if success { return true } else if busy { is_busy = true }
+    }
+
+    if let Some(fuse_pid) = fuse_pid {
+        if !is_busy && kill(fuse_pid, Signal::SIGTERM).is_ok() { return true }
+    }
+
+    eprintln!("Failed to unmount: {:?}", mount_point);
+    if fuse_pid.is_some() && is_mount_point(mount_point).unwrap_or(false) {
+        eprintln!("Unmount it manually!");
+    }
+    false
 }
 
 fn wait_mount(pid: Pid, path: &PathBuf, timeout: Duration) -> bool {
@@ -575,13 +630,10 @@ fn get_dwfs_workers(cachesize: &str, cpus: usize) -> String {
     }.to_string())
 }
 
-fn mount_image(embed: &Embed, image: &Image, mount_dir: PathBuf) {
+fn mount_image(embed: &Embed, image: &Image, mount_dir: PathBuf, uid: u32, gid: u32) {
     if is_mount_point(&mount_dir).unwrap_or(false) {
         return
     }
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
-
     let mount_dir = mount_dir.to_str().unwrap().to_string();
     let image_path = image.path.to_str().unwrap().to_string();
     if image.is_dwar {
@@ -785,17 +837,26 @@ fn try_read_dotenv(dotenv_path: &PathBuf, dotenv_string: &str) {
     }
 }
 
-fn signals_handler(pid: Pid, selfexit: bool) {
-    let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT]).unwrap();
-    let _ = signals.handle();
+fn signals_handler(pid: Pid, mount_point: &Path, selfexit: bool) {
+    let sig_list = [SIGINT, SIGTERM, SIGQUIT, SIGHUP];
+    let mut signals = match Signals::new(sig_list) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to register signal handlers: {e}");
+            return
+        }
+    };
+    let _handle = signals.handle();
     for signal in signals.forever() {
-        match signal {
-            SIGINT | SIGTERM | SIGQUIT | SIGHUP => {
-                let _ = kill(pid, Signal::SIGTERM);
-                if selfexit { exit(0) };
-                break
+        if sig_list.contains(&signal) {
+            try_unmount(Some(pid), mount_point);
+            unsafe {
+                for &sig in sig_list.iter() {
+                    libc::signal(sig, libc::SIG_DFL);
+                }
             }
-            _ => {}
+            if selfexit { exit(0) };
+            break
         }
     }
 }
@@ -932,8 +993,9 @@ fn main() {
 
     let mut exec_args: Vec<String> = env::args().collect();
     let arg0 = &exec_args.remove(0);
+    let arg0_name = &basename(arg0);
 
-    match basename(arg0).as_str() {
+    match arg0_name.as_str() {
         #[cfg(feature = "squashfs")]
         "squashfuse"       => { embed.squashfuse(exec_args); return }
         #[cfg(feature = "squashfs")]
@@ -952,6 +1014,33 @@ fn main() {
         "mkdwarfs"         => { embed.mkdwarfs(exec_args); return }
         #[cfg(feature = "dwarfs")]
         "dwarfsextract"    => { embed.dwarfsextract(exec_args); return }
+        "fusermount" | "fusermount3"    => {
+            let mut umount = false;
+            let mut mount_point = String::new();
+            for arg in &exec_args {
+                if arg == "-u" || arg == "--unmount" { umount = true }
+                else if !arg.starts_with('-') {
+                    mount_point = arg.clone();
+                    break
+                }
+            }
+            if umount && !mount_point.is_empty() {
+                if !try_unmount(None, Path::new(&mount_point))
+                    { exit(1) } return
+            }
+            let current_path = env::var("PATH").unwrap_or_default();
+            let filtered_path = current_path
+                .split(':')
+                .filter(|path| !path.starts_with("/tmp/.path"))
+                .collect::<Vec<_>>()
+                .join(":");
+            env::set_var("PATH", filtered_path);
+            drop(current_path);
+            let err = Command::new(arg0_name)
+                .args(&exec_args).exec();
+            eprintln!("Failed to execute {arg0_name}: {err}");
+            exit(1)
+         }
         _ => {}
     }
 
@@ -1189,13 +1278,15 @@ fn main() {
     #[cfg(not(feature = "appimage"))]
     let mnt_dir: PathBuf;
 
+    let uid: u32 = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+
     if target_dir.is_empty() {
         tmp_dir = env::temp_dir();
         let mut self_hash = "".to_string();
         let first5name: String = self_exe_name.split(".").next()
         .unwrap_or(self_exe_name).chars().take(5).collect();
         if is_extract_run || is_remp_mount {
-            let uid = unsafe { libc::getuid() };
             self_hash = hash_string(&(
                 xxh3_64(&runtime.headers_bytes) as u32 +
                 fast_hash_file(&image.path, image.offset).unwrap_or_else(|err|{
@@ -1217,7 +1308,6 @@ fn main() {
                 tmp_dir = tmp_dir.join(tmp_dir_name);
                 tmp_dirs = vec![&tmp_dir];
             } else {
-                let uid = unsafe { libc::getuid() };
                 ruid_dir = tmp_dir.join(format!(".r{uid}"));
                  mnt_dir = ruid_dir.join("mnt");
                 let tmp_dir_name: String = if is_extract_run && !is_mount_only {
@@ -1240,7 +1330,7 @@ fn main() {
 
     drop(runtime);
 
-    if (!is_extract_run || is_mount_only) && !check_fuse() {
+    if (!is_extract_run || is_mount_only) && !check_fuse(uruntime, uid) {
         check_extract!(is_mount_only, uruntime_extract, self_exe, {
             is_extract_run = true
         });
@@ -1323,8 +1413,8 @@ fn main() {
                 let mut cmd = Command::new(run.canonicalize().unwrap())
                     .args(&exec_args).spawn().unwrap();
                 let pid = Pid::from_raw(cmd.id() as i32);
-
-                spawn(move || signals_handler(pid, false) );
+                let tmp_dir_clone = tmp_dir.clone();
+                spawn(move || signals_handler(pid, &tmp_dir_clone, false) );
 
                 if let Ok(status) = cmd.wait() {
                     if let Some(code) = status.code() {
@@ -1332,7 +1422,8 @@ fn main() {
                     }
                 }
             } else if !is_tmpdir_exists {
-                spawn(move || signals_handler(child_pid, false) );
+                let tmp_dir_clone = tmp_dir.clone();
+                spawn(move || signals_handler(child_pid, &tmp_dir_clone, false) );
                 wait_pid_exit(child_pid, None);
             } else { exit(0) }
 
@@ -1341,22 +1432,23 @@ fn main() {
                     Ok(ForkResult::Parent { child: _ }) => { exit(exit_code) }
                     Ok(ForkResult::Child) => {
                         try_setsid();
-                        spawn(move || signals_handler(child_pid, true) );
+                        let tmp_dir_clone = tmp_dir.clone();
+                        spawn(move || signals_handler(child_pid, &tmp_dir_clone, true) );
 
                         let is_mount = !is_extract_run && !is_mount_only;
                         let reuse_check_delay = parse_reuse_check_delay(&reuse_check_delay);
 
                         if is_extract_run {
                             if !is_noclenup && reuse_check_delay.is_some() {
-                                wait_dir_notuse(&tmp_dir,None, reuse_check_delay, true);
+                                wait_dir_notuse(&tmp_dir, None, reuse_check_delay, true);
                                 let _ = remove_dir_all(&tmp_dir);
                             }
                         } else if !is_remp_mount && is_mount {
                             wait_dir_notuse(&tmp_dir, None, None, false);
-                            let _ = kill(child_pid, Signal::SIGTERM);
+                            try_unmount(Some(child_pid), &tmp_dir);
                         } else if is_remp_mount && is_mount && reuse_check_delay.is_some() {
                             wait_dir_notuse(&tmp_dir, None, reuse_check_delay, true);
-                            let _ = kill(child_pid, Signal::SIGTERM);
+                            try_unmount(Some(child_pid), &tmp_dir);
                         }
                         if is_mount {
                             wait_pid_exit(child_pid, Some(Duration::from_secs(1)));
@@ -1385,7 +1477,7 @@ fn main() {
                 if is_extract_run {
                     extract_image(&embed, &image, tmp_dir, is_extract_run, None)
                 } else {
-                    mount_image(&embed, &image, tmp_dir)
+                    mount_image(&embed, &image, tmp_dir, uid, gid)
                 }
             } else { exit(0) }
         }
