@@ -103,6 +103,7 @@ RunImage runtime usage
      --runtime-portable-config           Create a portable config folder to use as $XDG_CONFIG_HOME
      --runtime-portable-cache            Create a portable cache folder to use as $XDG_CACHE_HOME
      --runtime-help                      Print this help
+     --runtime-unshare                   Try to use unshare user and mount namespaces
      --runtime-version                   Print version of Runtime
      --runtime-signature                 Print digital signature embedded in RunImage
      --runtime-addsign    'SIGN|/file'   Add digital signature to RunImage
@@ -156,6 +157,10 @@ RunImage runtime usage
 
       URUNTIME                       Path to uruntime
       URUNTIME_DIR                   Path to uruntime directory
+      URUNTIME_UNSHARE=1             Try to use unshare user and mount namespaces
+      URUNTIME_UNSHARE_ROOT=1        Map to root (UID 0, GID 0) in user namespace
+      URUNTIME_UNSHARE_UID=int       Map to specified UID in user namespace
+      URUNTIME_UNSHARE_GID=int       Map to specified GID in user namespace
       RUNTIME_EXTRACT_AND_RUN=1      Run the RunImage afer extraction without using FUSE
       NO_CLEANUP=1                   Do not clear the unpacking directory after closing when
                                        using extract and run option for reuse extracted data
@@ -199,6 +204,7 @@ AppImage runtime usage
      --appimage-portable-config           Create a portable config folder to use as $XDG_CONFIG_HOME
      --appimage-portable-cache            Create a portable cache folder to use as $XDG_CACHE_HOME
      --appimage-help                      Print this help
+     --appimage-unshare                   Try to use unshare user and mount namespaces
      --appimage-version                   Print version of Runtime
      --appimage-signature                 Print digital signature embedded in AppImage
      --appimage-addsign    'SIGN|/file'   Add digital signature to AppImage
@@ -249,6 +255,10 @@ AppImage runtime usage
 
       URUNTIME                       Path to uruntime
       URUNTIME_DIR                   Path to uruntime directory
+      URUNTIME_UNSHARE=1             Try to use unshare user and mount namespaces
+      URUNTIME_UNSHARE_ROOT=1        Map to root (UID 0, GID 0) in user namespace
+      URUNTIME_UNSHARE_UID=int       Map to specified UID in user namespace
+      URUNTIME_UNSHARE_GID=int       Map to specified GID in user namespace
       APPIMAGE_EXTRACT_AND_RUN=1     Run the AppImage afer extraction without using FUSE
       NO_CLEANUP=1                   Do not clear the unpacking directory after closing when
                                        using extract and run option for reuse extracted data

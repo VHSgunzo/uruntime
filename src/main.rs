@@ -10,8 +10,8 @@ use std::{
     fs::{self, File, Permissions, create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, set_permissions, read_to_string},
 };
 
-use which::which;
 use cfg_if::cfg_if;
+use which::which_all;
 use xxhash_rust::xxh3::xxh3_64;
 use goblin::elf::{Elf, SectionHeader};
 use memfd_exec::{MemFdExecutable, Stdio};
@@ -19,10 +19,13 @@ use nix::unistd::{access, fork, setsid, getcwd, AccessFlags, ForkResult, Pid};
 use signal_hook::{consts::{SIGINT, SIGTERM, SIGQUIT, SIGHUP}, iterator::Signals};
 use nix::{libc, sys::{wait::waitpid, signal::{Signal, kill}}, mount::umount, errno::Errno};
 
+const _LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const URUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 const URUNTIME_MOUNT: &str = "URUNTIME_MOUNT=3";
 const URUNTIME_CLEANUP: &str = "URUNTIME_CLEANUP=1";
 const URUNTIME_EXTRACT: &str = "URUNTIME_EXTRACT=3";
+
 const REUSE_CHECK_DELAY: &str = "5s";
 const MAX_EXTRACT_SELF_SIZE: u64 = 350 * 1024 * 1024; // 350 MB
 #[cfg(feature = "dwarfs")]
@@ -40,6 +43,18 @@ cfg_if! {
         const ARG_PFX: &str = "runtime";
         const SELF_NAME: &str = "RunImage";
     }
+}
+
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: i32,
+}
+#[repr(C)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
 }
 
 #[derive(Debug)]
@@ -201,7 +216,7 @@ fn get_image(path: &PathBuf, offset: u64) -> Result<Image> {
 }
 
 fn get_env_var(var: &str) -> String {
-    env::var(var).unwrap_or("".into())
+    env::var(var).unwrap_or_default()
 }
 
 fn add_to_path(path: &PathBuf) {
@@ -216,12 +231,98 @@ fn add_to_path(path: &PathBuf) {
     }
 }
 
-fn check_fuse(uruntime: &Path, uid: u32) -> bool {
+fn restore_capabilities() {
+    let mut caps = CapHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+    let mut cap_data = CapData { effective: 0, permitted: 0, inheritable: 0 };
+    if unsafe { libc::syscall(libc::SYS_capget, &mut caps, &mut cap_data) } == 0 {
+        let last_cap = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(39);
+        let all_caps = (1u64 << (last_cap + 1)) - 1;
+        cap_data.effective = all_caps as u32;
+        cap_data.permitted = all_caps as u32;
+        cap_data.inheritable = all_caps as u32;
+        unsafe { libc::syscall(libc::SYS_capset, &caps, &cap_data) };
+        for cap in 0..=last_cap {
+            unsafe { libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_RAISE, cap, 0, 0) };
+        }
+    } else {
+        eprintln!("Warning: failed to get capabilities: {}", Error::last_os_error())
+    }
+}
+
+fn try_make_mount_private() -> bool {
+    unsafe {
+        libc::mount(
+            c"none".as_ptr(),
+            c"/".as_ptr(),
+            c"none".as_ptr(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null()
+        ) == 0
+    }
+}
+
+fn try_unshare(uid: u32, gid: u32, unshare_uid: &str, unshare_gid: &str) -> bool {
+    let target_uid = unshare_uid.parse().unwrap_or(uid);
+    let target_gid = unshare_gid.parse().unwrap_or(gid);
+    let flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNS;
+    let result = unsafe { libc::unshare(flags) };
+    if result == 0 {
+        let _ = fs::write("/proc/self/setgroups", "deny");
+        let uid_map = format!("{} {} 1", target_uid, uid);
+        let gid_map = format!("{} {} 1", target_gid, gid);
+        if fs::write("/proc/self/uid_map", uid_map).is_ok() &&
+           fs::write("/proc/self/gid_map", gid_map).is_ok() {
+            restore_capabilities();
+            if !try_make_mount_private() {
+                eprintln!("Warning: failed to make mount private: {}", Error::last_os_error())
+            }
+            return true
+        }
+    }
+    eprintln!("Failed to create user and mount namespaces: {}", Error::last_os_error());
+    false
+}
+
+fn is_in_user_and_mount_namespace() -> bool {
+    let uid_map = match read_to_string("/proc/self/uid_map") {
+        Ok(content) => content,
+        Err(_) => return false,
+    };
+    let uid_map = uid_map.trim();
+    if uid_map.is_empty() || uid_map.split_whitespace().collect::<Vec<_>>() == vec!["0", "0", "4294967295"] {
+        return false
+    }
+    let lines: Vec<&str> = uid_map.lines().collect();
+    if lines.is_empty() {
+        return false
+    }
+    for line in lines {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() == 3 {
+            if let Ok(count) = parts[2].parse::<u32>() {
+                if count < 4294967295 {
+                    return try_make_mount_private()
+                }
+            }
+        }
+    }
+    false
+}
+
+fn check_fuse(uruntime: &Path, uid: u32, gid: u32, unshare_uid: &str, unshare_gid: &str, unshare_succeeded: &mut bool) -> bool {
+    if access("/dev/fuse", AccessFlags::R_OK).is_err() ||
+       access("/dev/fuse", AccessFlags::W_OK).is_err() {
+        return false
+    }
+    if uid == 0 || *unshare_succeeded || is_in_user_and_mount_namespace() { return true }
     fn create_fusermount_dir(tmp_path_dir: &PathBuf) -> bool {
         if !tmp_path_dir.is_dir() {
             if let Err(err) = create_dir_all(tmp_path_dir) {
-                eprintln!("Failed to create fusermount dir: {err}: {:?}", tmp_path_dir);
-                return false;
+                eprintln!("Failed to create fusermount PATH dir: {err}: {:?}", tmp_path_dir);
+                return false
             }
             add_to_path(tmp_path_dir);
         }
@@ -232,42 +333,71 @@ fn check_fuse(uruntime: &Path, uid: u32) -> bool {
         let _ = remove_file(&fsmntlink_path);
         if let Err(err) = symlink(fusermount_path, &fsmntlink_path) {
             eprintln!("Failed to create fusermount symlink: {err}: {:?}", fsmntlink_path);
-            return false;
+            return false
         }
         true
     }
     let mut is_fusermount = true;
     let fusermount_list = ["fusermount", "fusermount3"];
     let tmp_path_dir = &PathBuf::from(format!("/tmp/.path{uid}"));
-    if tmp_path_dir.is_dir() { add_to_path(tmp_path_dir) }
+    if tmp_path_dir.is_dir() {
+        let uruntime_path = uruntime.canonicalize().ok();
+        for fusermount in fusermount_list {
+            let old_symlink = tmp_path_dir.join(fusermount);
+            if old_symlink.exists() {
+                if let Ok(canonical_path) = old_symlink.canonicalize() {
+                    if is_suid_exe(&canonical_path).unwrap_or(false) {
+                        continue
+                    }
+                    if let Some(ref uruntime_canonical) = uruntime_path {
+                        if canonical_path == *uruntime_canonical {
+                            continue
+                        }
+                    }
+                }
+                let _ = remove_file(&old_symlink);
+            }
+        }
+        add_to_path(tmp_path_dir)
+    }
     let fusermount_prog = &get_env_var("FUSERMOUNT_PROG");
-    if PathBuf::from(fusermount_prog).is_file() {
+    if is_suid_exe(&PathBuf::from(fusermount_prog)).unwrap_or(false) {
         if !create_fusermount_dir(tmp_path_dir) { exit(1) }
         if !create_fusermount_symlink(tmp_path_dir, fusermount_prog, &basename(fusermount_prog)) { exit(1) }
     } else {
-        for fusermount in fusermount_list {
-            let fallback: &str = if fusermount.ends_with("3")
-                { "fusermount" } else { "fusermount3" };
-            if which(fusermount).is_err() {
-                if let Ok(fusermount_path) = which(fallback) {
-                    if !create_fusermount_dir(tmp_path_dir) { break }
-                    if !create_fusermount_symlink(tmp_path_dir, &fusermount_path.to_string_lossy(), fusermount) { break }
-                    break
-                } else {
-                    is_fusermount = false
+        fn find_suid_fusermount(name: &str) -> Option<PathBuf> {
+            for path in which_all(name).ok()? {
+                let canonical_path = path.canonicalize().ok()?;
+                if is_suid_exe(&canonical_path).unwrap_or(false) {
+                    return Some(canonical_path)
                 }
             }
+            None
+        }
+        for fusermount in fusermount_list {
+            if find_suid_fusermount(fusermount).is_some() {
+                continue
+            }
+            let fallback: &str = if fusermount.ends_with("3")
+                { "fusermount" } else { "fusermount3" };
+            if let Some(fusermount_path) = find_suid_fusermount(fallback) {
+                if !create_fusermount_dir(tmp_path_dir) { break }
+                if !create_fusermount_symlink(tmp_path_dir, &fusermount_path.to_string_lossy(), fusermount) { break }
+                break
+            }
+            is_fusermount = false
         }
     }
     if !is_fusermount {
+        eprintln!("SUID fusermount not found in PATH, trying to unshare...");
+        if try_unshare(uid, gid, unshare_uid, unshare_gid) {
+            *unshare_succeeded = true;
+            return true
+        }
         for fusermount in fusermount_list {
             if !create_fusermount_dir(tmp_path_dir) { break }
             if !create_fusermount_symlink(tmp_path_dir, &uruntime.to_string_lossy(), fusermount) { break }
         }
-    }
-    if access("/dev/fuse", AccessFlags::R_OK).is_err() ||
-       access("/dev/fuse", AccessFlags::W_OK).is_err() {
-        return false
     }
     true
 }
@@ -432,6 +562,13 @@ fn is_mount_point(path: &Path) -> Result<bool> {
 
 fn get_file_size(path: &PathBuf) -> Result<u64> {
     Ok(fs::metadata(path)?.len())
+}
+
+fn is_suid_exe(path: &PathBuf) -> Result<bool> {
+    let metadata = fs::metadata(path)?;
+    let permissions = metadata.permissions();
+    let mode = permissions.mode();
+    Ok((mode & 0o4000 != 0) && (mode & 0o111 != 0))
 }
 
 fn is_dir_inuse(mount_point: &PathBuf) -> Result<bool> {
@@ -894,6 +1031,7 @@ fn print_usage(portable_home: &PathBuf, portable_share: &PathBuf, portable_confi
      --{ARG_PFX}-portable-config           Create a portable config folder to use as $XDG_CONFIG_HOME
      --{ARG_PFX}-portable-cache            Create a portable cache folder to use as $XDG_CACHE_HOME
      --{ARG_PFX}-help                      Print this help
+     --{ARG_PFX}-unshare                   Try to use unshare user and mount namespaces
      --{ARG_PFX}-version                   Print version of Runtime
      --{ARG_PFX}-signature                 Print digital signature embedded in {SELF_NAME}
      --{ARG_PFX}-addsign    'SIGN|/file'   Add digital signature to {SELF_NAME}
@@ -957,6 +1095,10 @@ fn print_usage(portable_home: &PathBuf, portable_share: &PathBuf, portable_confi
 
       URUNTIME                       Path to uruntime
       URUNTIME_DIR                   Path to uruntime directory
+      URUNTIME_UNSHARE=1             Try to use unshare user and mount namespaces
+      URUNTIME_UNSHARE_ROOT=1        Map to root (UID 0, GID 0) in user namespace
+      URUNTIME_UNSHARE_UID=int       Map to specified UID in user namespace
+      URUNTIME_UNSHARE_GID=int       Map to specified GID in user namespace
       {}_EXTRACT_AND_RUN=1      Run the {SELF_NAME} afer extraction without using FUSE
       NO_CLEANUP=1                   Do not clear the unpacking directory after closing when
                                        using extract and run option for reuse extracted data
@@ -1024,10 +1166,6 @@ fn main() {
                     break
                 }
             }
-            if umount && !mount_point.is_empty() {
-                if !try_unmount(None, Path::new(&mount_point))
-                    { exit(1) } return
-            }
             let current_path = env::var("PATH").unwrap_or_default();
             let filtered_path = current_path
                 .split(':')
@@ -1036,6 +1174,10 @@ fn main() {
                 .join(":");
             env::set_var("PATH", filtered_path);
             drop(current_path);
+            if umount && !mount_point.is_empty() {
+                if !try_unmount(None, Path::new(&mount_point))
+                    { exit(1) } return
+            }
             let err = Command::new(arg0_name)
                 .args(&exec_args).exec();
             eprintln!("Failed to execute {arg0_name}: {err}");
@@ -1128,6 +1270,7 @@ fn main() {
     let self_exe_dotenv = &self_exe_dir.join(format!("{self_exe_name}.env"));
     try_read_dotenv(self_exe_dotenv, &runtime.envs);
 
+    let mut is_unshare = false;
     let mut is_mount_only = false;
     let mut is_extract_run = false;
     let mut is_noclenup = !matches!(URUNTIME_CLEANUP.replace("URUNTIME_CLEANUP=", "=").as_str(), "=1");
@@ -1221,6 +1364,10 @@ fn main() {
             ref arg if arg == &format!("--{ARG_PFX}-extract-and-run") => {
                 exec_args.remove(0);
                 is_extract_run = true
+            }
+            ref arg if arg == &format!("--{ARG_PFX}-unshare") => {
+                exec_args.remove(0);
+                is_unshare = true
             }
             _ => {}
         }
@@ -1330,14 +1477,28 @@ fn main() {
 
     drop(runtime);
 
-    if (!is_extract_run || is_mount_only) && !check_fuse(uruntime, uid) {
+    let unshare_var = get_env_var("URUNTIME_UNSHARE");
+    let unshare_root = get_env_var("URUNTIME_UNSHARE_ROOT");
+    let (unshare_uid, unshare_gid) = if unshare_root == "1" { ("0".into(), "0".into()) }
+    else { (get_env_var("URUNTIME_UNSHARE_UID"), get_env_var("URUNTIME_UNSHARE_GID")) };
+    let should_unshare = is_unshare
+        || unshare_var == "1"
+        || unshare_root == "1"
+        || !unshare_uid.is_empty()
+        || !unshare_gid.is_empty();
+    let mut unshare_succeeded = if should_unshare {
+        try_unshare(uid, gid, &unshare_uid, &unshare_gid)
+    } else { false  };
+
+    if (!is_extract_run || is_mount_only) &&
+    !check_fuse(uruntime, uid, gid, &unshare_uid, &unshare_gid, &mut unshare_succeeded) {
         check_extract!(is_mount_only, uruntime_extract, self_exe, {
             is_extract_run = true
         });
     }
+    drop(unshare_var); drop(unshare_uid); drop(unshare_gid);
 
     if is_mount_only {
-        println!("{}", tmp_dir.display());
         is_extract_run = false
     } else if is_extract_run {
         is_noclenup = get_env_var("NO_CLEANUP") == "1"
@@ -1432,6 +1593,8 @@ fn main() {
                     Ok(ForkResult::Parent { child: _ }) => { exit(exit_code) }
                     Ok(ForkResult::Child) => {
                         try_setsid();
+                        if unshare_succeeded { restore_capabilities() }
+
                         let tmp_dir_clone = tmp_dir.clone();
                         spawn(move || signals_handler(child_pid, &tmp_dir_clone, true) );
 
@@ -1466,10 +1629,20 @@ fn main() {
         Ok(ForkResult::Child) => {
             if !is_tmpdir_exists {
                 try_setsid();
+                if unshare_succeeded { restore_capabilities() }
 
                 if let Err(err) = create_tmp_dirs(tmp_dirs) {
                     eprintln!("Failed to create tmp dir: {err}");
                     exit(1)
+                }
+
+                if is_mount_only {
+                    if unshare_succeeded {
+                        let pid = unsafe { libc::getpid() };
+                        println!("/proc/{pid}/root{}", tmp_dir.display());
+                    } else {
+                        println!("{}", tmp_dir.display());
+                    }
                 }
 
                 unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) };
