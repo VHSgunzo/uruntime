@@ -1536,6 +1536,11 @@ fn main() {
                 }
             } else { spawn(move || waitpid(child_pid, None) ); }
 
+            if is_mount_only {
+                if unshare_succeeded { println!("/proc/{child_pid}/root{}", tmp_dir.display()) }
+                else { println!("{}", tmp_dir.display()) }
+            }
+
             let mut exit_code = 143;
             if !is_mount_only {
                 cfg_if! {
@@ -1634,15 +1639,6 @@ fn main() {
                 if let Err(err) = create_tmp_dirs(tmp_dirs) {
                     eprintln!("Failed to create tmp dir: {err}");
                     exit(1)
-                }
-
-                if is_mount_only {
-                    if unshare_succeeded {
-                        let pid = unsafe { libc::getpid() };
-                        println!("/proc/{pid}/root{}", tmp_dir.display());
-                    } else {
-                        println!("{}", tmp_dir.display());
-                    }
                 }
 
                 unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) };
