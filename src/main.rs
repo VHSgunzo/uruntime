@@ -1441,55 +1441,6 @@ fn main() {
     let uid: u32 = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
-    if target_dir.is_empty() {
-        tmp_dir = env::temp_dir();
-        let mut self_hash = "".to_string();
-        let first5name: String = self_exe_name.split(".").next()
-        .unwrap_or(self_exe_name).chars().take(5).collect();
-        if is_extract_run || is_remp_mount {
-            self_hash = hash_string(&(
-                xxh3_64(&runtime.headers_bytes) as u32 +
-                fast_hash_file(&image.path, image.offset).unwrap_or_else(|err|{
-                    eprintln!("Failed to get image hash: {err}");
-                    exit(1)}) +
-                uid
-            ).to_string())
-        }
-
-        cfg_if! {
-            if #[cfg(feature = "appimage")] {
-                let tmp_dir_name: String = if is_extract_run && !is_mount_only {
-                    format!("appimage_extracted_{first5name}{self_hash}")
-                } else if is_remp_mount {
-                    format!(".mount_{first5name}remp{self_hash}")
-                } else {
-                    format!(".mount_{first5name}{}", random_string(6))
-                };
-                tmp_dir = tmp_dir.join(tmp_dir_name);
-                tmp_dirs = vec![&tmp_dir];
-            } else {
-                ruid_dir = tmp_dir.join(format!(".r{uid}"));
-                 mnt_dir = ruid_dir.join("mnt");
-                let tmp_dir_name: String = if is_extract_run && !is_mount_only {
-                    format!("{first5name}extr{self_hash}")
-                } else if is_remp_mount {
-                    format!("{first5name}remp{self_hash}")
-                } else {
-                    format!("{first5name}{}", random_string(6))
-                };
-                tmp_dir = mnt_dir.join(tmp_dir_name);
-                tmp_dirs = vec![&tmp_dir, &mnt_dir, &ruid_dir];
-            }
-        }
-        drop(first5name);
-    } else {
-        env::remove_var(format!("{ENV_NAME}_TARGET_DIR"));
-        tmp_dir = PathBuf::from(target_dir);
-        tmp_dirs = vec![&tmp_dir]
-    }
-
-    drop(runtime);
-
     let unshare_var = get_env_var!("{}_UNSHARE", ENV_NAME);
     let unshare_root = get_env_var!("{}_UNSHARE_ROOT", ENV_NAME);
     let (unshare_uid, unshare_gid) = if unshare_root == "1" { ("0".into(), "0".into()) }
@@ -1510,6 +1461,55 @@ fn main() {
         });
     }
     drop(unshare_var); drop(unshare_uid); drop(unshare_gid);
+
+    if target_dir.is_empty() {
+        tmp_dir = env::temp_dir();
+        let mut self_hash = "".to_string();
+        let first5name: String = self_exe_name.split(".").next()
+        .unwrap_or(self_exe_name).chars().take(5).collect();
+        if is_extract_run || is_remp_mount {
+            self_hash = hash_string(&(
+                xxh3_64(&runtime.headers_bytes) as u32 +
+                fast_hash_file(&image.path, image.offset).unwrap_or_else(|err|{
+                    eprintln!("Failed to get image hash: {err}");
+                    exit(1)}) +
+                uid
+            ).to_string())
+        }
+
+        cfg_if! {
+            if #[cfg(feature = "appimage")] {
+                let tmp_dir_name: String = if is_extract_run && !is_mount_only {
+                    format!("appimage_extracted_{first5name}{self_hash}")
+                } else if is_remp_mount && !unshare_succeeded {
+                    format!(".mount_{first5name}remp{self_hash}")
+                } else {
+                    format!(".mount_{first5name}{}", random_string(6))
+                };
+                tmp_dir = tmp_dir.join(tmp_dir_name);
+                tmp_dirs = vec![&tmp_dir];
+            } else {
+                ruid_dir = tmp_dir.join(format!(".r{uid}"));
+                 mnt_dir = ruid_dir.join("mnt");
+                let tmp_dir_name: String = if is_extract_run && !is_mount_only {
+                    format!("{first5name}extr{self_hash}")
+                } else if is_remp_mount && !unshare_succeeded {
+                    format!("{first5name}remp{self_hash}")
+                } else {
+                    format!("{first5name}{}", random_string(6))
+                };
+                tmp_dir = mnt_dir.join(tmp_dir_name);
+                tmp_dirs = vec![&tmp_dir, &mnt_dir, &ruid_dir];
+            }
+        }
+        drop(first5name);
+    } else {
+        env::remove_var(format!("{ENV_NAME}_TARGET_DIR"));
+        tmp_dir = PathBuf::from(target_dir);
+        tmp_dirs = vec![&tmp_dir]
+    }
+
+    drop(runtime);
 
     if is_mount_only {
         is_extract_run = false
