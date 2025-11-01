@@ -16,7 +16,7 @@ const DWARFS_VERSION: &str = "0.14.1";
 #[cfg(feature = "squashfs")]
 const SQUASHFS_TOOLS_VERSION: &str = "4.7.2";
 #[cfg(feature = "squashfs")]
-const SQUASHFUSE_VERSION: &str = "0.6.1";
+const SQUASHFUSE_VERSION: &str = "0.6.1.r4";
 
 
 fn main() {

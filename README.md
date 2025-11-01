@@ -157,18 +157,18 @@ RunImage runtime usage
 
       URUNTIME                       Path to uruntime
       URUNTIME_DIR                   Path to uruntime directory
-      URUNTIME_UNSHARE=1             Try to use unshare user and mount namespaces
-      URUNTIME_UNSHARE_ROOT=1        Map to root (UID 0, GID 0) in user namespace
-      URUNTIME_UNSHARE_UID=int       Map to specified UID in user namespace
-      URUNTIME_UNSHARE_GID=int       Map to specified GID in user namespace
+      RUNIMAGE_UNSHARE=1             Try to use unshare user and mount namespaces
+      RUNIMAGE_UNSHARE_ROOT=1        Map to root (UID 0, GID 0) in user namespace
+      RUNIMAGE_UNSHARE_UID=0         Map to specified UID in user namespace
+      RUNIMAGE_UNSHARE_GID=0         Map to specified GID in user namespace
       RUNTIME_EXTRACT_AND_RUN=1      Run the RunImage afer extraction without using FUSE
       NO_CLEANUP=1                   Do not clear the unpacking directory after closing when
                                        using extract and run option for reuse extracted data
       NO_UNMOUNT=1                   Do not unmount the mount directory after closing 
                                       for reuse mount point
       TMPDIR=/path                   Specifies a custom path for mounting or extracting the image
-      URUNTIME_TARGET_DIR=/path      Specifies the exact path for mounting or extracting the image
-      REUSE_CHECK_DELAY=5s           Specifies the delay between checks of using the image dir (inf|1|1s|1m|1h)
+      RUNIMAGE_TARGET_DIR=/path      Specifies the exact path for mounting or extracting the image
+      REUSE_CHECK_DELAY=5s           Specifies the delay between checks of using the image dir (0|inf|1|1s|1m|1h)
       FUSERMOUNT_PROG=/path          Specifies a custom path for fusermount
       ENABLE_FUSE_DEBUG=1            Enables debug mode for the mounted filesystem
       TARGET_RUNIMAGE=/path          Operate on a target RunImage rather than this file itself
@@ -255,18 +255,18 @@ AppImage runtime usage
 
       URUNTIME                       Path to uruntime
       URUNTIME_DIR                   Path to uruntime directory
-      URUNTIME_UNSHARE=1             Try to use unshare user and mount namespaces
-      URUNTIME_UNSHARE_ROOT=1        Map to root (UID 0, GID 0) in user namespace
-      URUNTIME_UNSHARE_UID=int       Map to specified UID in user namespace
-      URUNTIME_UNSHARE_GID=int       Map to specified GID in user namespace
+      APPIMAGE_UNSHARE=1             Try to use unshare user and mount namespaces
+      APPIMAGE_UNSHARE_ROOT=1        Map to root (UID 0, GID 0) in user namespace
+      APPIMAGE_UNSHARE_UID=0         Map to specified UID in user namespace
+      APPIMAGE_UNSHARE_GID=0         Map to specified GID in user namespace
       APPIMAGE_EXTRACT_AND_RUN=1     Run the AppImage afer extraction without using FUSE
       NO_CLEANUP=1                   Do not clear the unpacking directory after closing when
                                        using extract and run option for reuse extracted data
       NO_UNMOUNT=1                   Do not unmount the mount directory after closing 
                                       for reuse mount point
       TMPDIR=/path                   Specifies a custom path for mounting or extracting the image
-      URUNTIME_TARGET_DIR=/path      Specifies the exact path for mounting or extracting the image
-      REUSE_CHECK_DELAY=5s           Specifies the delay between checks of using the image dir (inf|1|1s|1m|1h)
+      APPIMAGE_TARGET_DIR=/path      Specifies the exact path for mounting or extracting the image
+      REUSE_CHECK_DELAY=5s           Specifies the delay between checks of using the image dir (0|inf|1|1s|1m|1h)
       FUSERMOUNT_PROG=/path          Specifies a custom path for fusermount
       ENABLE_FUSE_DEBUG=1            Enables debug mode for the mounted filesystem
       TARGET_APPIMAGE=/path          Operate on a target AppImage rather than this file itself
