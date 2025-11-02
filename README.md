@@ -71,6 +71,15 @@ sed -i 's|URUNTIME_CLEANUP=[0-9]|URUNTIME_CLEANUP=0|' /path/uruntime
 sed -i 's|URUNTIME_CLEANUP=[0-9]|URUNTIME_CLEANUP=1|' /path/uruntime
 ```
 
+* `URUNTIME_UNSHARE` - Specifies whether to try using unshare user and mount namespaces by default
+```
+# URUNTIME_UNSHARE=0 - Don't run in unshare mode by default (default)
+sed -i 's|URUNTIME_UNSHARE=[0-9]|URUNTIME_UNSHARE=0|' /path/uruntime
+
+# URUNTIME_UNSHARE=1 - Run in unshare mode by default
+sed -i 's|URUNTIME_UNSHARE=[0-9]|URUNTIME_UNSHARE=1|' /path/uruntime
+```
+
 * `URUNTIME_MOUNT` - Specifies the mount logic
 ```
 # URUNTIME_MOUNT=0 - Reuse mount point and disable unmounting of the mount directory

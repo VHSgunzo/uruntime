@@ -37,6 +37,7 @@ const URUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 const URUNTIME_MOUNT: &str = "URUNTIME_MOUNT=3";
 const URUNTIME_CLEANUP: &str = "URUNTIME_CLEANUP=1";
 const URUNTIME_EXTRACT: &str = "URUNTIME_EXTRACT=3";
+const URUNTIME_UNSHARE: &str = "URUNTIME_UNSHARE=0";
 
 const REUSE_CHECK_DELAY: &str = "5s";
 const MAX_EXTRACT_SELF_SIZE: u64 = 350 * 1024 * 1024; // 350 MB
@@ -348,32 +349,35 @@ fn try_setns(pid: Pid) -> bool {
     false
 }
 
-fn write_mount_pid_file(mount_point: &Path, pid: Pid) -> Result<()> {
-    let pid_file = mount_point.with_extension("pid");
-    fs::write(&pid_file, pid.as_raw().to_string())?;
+fn read_mount_pid_file(mount_point: &Path, extension: &str) -> Option<Pid> {
+    let pid_file = mount_point.with_extension(extension);
+    if let Ok(pid_str) = read_to_string(&pid_file) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            return Some(Pid::from_raw(pid));
+        }
+    }
+    None
+}
+
+fn write_mount_pid_file(mount_point: &Path, pid: Pid, unshare_succeeded: bool) -> Result<()> {
+    let pidfile_ext = if !unshare_succeeded { "pid" } else { "un.pid" };
+    let pidfile_path = mount_point.with_extension(pidfile_ext);
+    fs::write(&pidfile_path, pid.as_raw().to_string())?;
     Ok(())
 }
 
-fn try_reuse_mount_point(mount_point: &Path) -> bool {
-    let pid_file = mount_point.with_extension("pid");
-    if !pid_file.is_file() { return false }
-    let pid_str = match read_to_string(&pid_file) {
-        Ok(content) => content.trim().to_string(),
-        Err(_) => { return false },
-    };
-    let pid = match pid_str.parse::<i32>() {
-        Ok(p) => Pid::from_raw(p),
-        Err(_) => { return false },
-    };
+fn try_reuse_unshare_mount_point(mount_point: &Path) -> Option<Pid> {
+    let pid = read_mount_pid_file(mount_point, "un.pid")?;
     if !is_pid_exists(pid) {
-        let _ = remove_file(&pid_file);
-        return false
+        let un_pid_file = mount_point.with_extension("un.pid");
+        let _ = remove_file(&un_pid_file);
+        return None
     }
     if try_setns(pid)
         && is_mount_point(mount_point).unwrap_or(false) {
-        return true
+        return Some(pid)
     }
-    false
+    None
 }
 
 fn check_fuse(uruntime: &Path, uid: u32, gid: u32, unshare_uid: &str, unshare_gid: &str, unshare_succeeded: &mut bool) -> bool {
@@ -777,13 +781,12 @@ fn try_setsid() {
     }
 }
 
-fn remove_tmp_dirs(dirs: Vec<&PathBuf> ) {
+fn remove_tmp_dirs(dirs: Vec<&PathBuf>, unshare_succeeded: bool) {
     if let Some(dir) = dirs.first() {
         if !is_mount_point(dir).unwrap_or(false) {
-            let pid_file = dir.with_extension("pid");
-            if pid_file.is_file() {
-                let _ = remove_file(&pid_file);
-            }
+            let pidfile_ext = if !unshare_succeeded { "pid" } else { "un.pid" };
+            let pid_file = dir.with_extension(pidfile_ext);
+            if pid_file.is_file() { let _ = remove_file(&pid_file); }
         }
     }
     for dir in dirs { let _ = remove_dir(dir); }
@@ -1341,10 +1344,10 @@ fn main() {
     let self_exe_dotenv = &self_exe_dir.join(format!("{self_exe_name}.env"));
     try_read_dotenv(self_exe_dotenv, &runtime.envs);
 
-    let mut is_unshare = false;
     let mut is_mount_only = false;
     let mut is_extract_run = false;
     let mut is_noclenup = !matches!(URUNTIME_CLEANUP.replace("URUNTIME_CLEANUP=", "=").as_str(), "=1");
+    let mut is_unshare = matches!(URUNTIME_UNSHARE.replace("URUNTIME_UNSHARE=", "=").as_str(), "=1");
 
     if get_env_var!("{}_EXTRACT_AND_RUN", ENV_NAME) == "1" {
         is_extract_run = true
@@ -1554,45 +1557,14 @@ fn main() {
     if get_env_var!("{}_UNSHARE_ROOT", ENV_NAME) == "1" { ("0".into(), "0".into()) }
     else { (get_env_var!("{}_UNSHARE_UID", ENV_NAME), get_env_var!("{}_UNSHARE_GID", ENV_NAME)) };
 
-    let mut reused_mount_point = false;
-    let mut reused_mount_pid: Option<Pid> = None;
-    if is_remp_mount && !is_extract_run && try_reuse_mount_point(&tmp_dir) {
-        unshare_succeeded = true;
-        reused_mount_point = true;
-        let pid_file = tmp_dir.with_extension("pid");
-        if let Ok(pid_str) = read_to_string(&pid_file) {
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                reused_mount_pid = Some(Pid::from_raw(pid));
-            }
+    let mut is_unshare_remp = false;
+    let mut child_pid = Pid::from_raw(0);
+    if is_remp_mount && !is_extract_run {
+        if let Some(pid) = try_reuse_unshare_mount_point(&tmp_dir) {
+            unshare_succeeded = true;
+            is_unshare_remp = true;
+            child_pid = pid
         }
-    }
-
-    if !reused_mount_point
-        && (is_unshare
-            || get_env_var!("{}_UNSHARE", ENV_NAME) == "1"
-            || !unshare_uid.is_empty()
-            || !unshare_gid.is_empty())
-    {
-        unshare_succeeded = try_unshare(uid, gid, &unshare_uid, &unshare_gid)
-    }
-
-    if (!is_extract_run || is_mount_only) &&
-    !check_fuse(uruntime, uid, gid, &unshare_uid, &unshare_gid, &mut unshare_succeeded) {
-        check_extract!(is_mount_only, uruntime_extract, self_exe, {
-            is_extract_run = true
-        });
-    }
-    drop(unshare_uid); drop(unshare_gid);
-
-    if is_mount_only {
-        is_extract_run = false
-    } else if is_extract_run {
-        is_noclenup = get_env_var!("NO_CLEANUP") == "1"
-    }
-
-    if !is_extract_run && get_env_var!("NO_UNMOUNT") == "1" {
-        is_remp_mount = true;
-        reuse_check_delay = "inf".into()
     }
 
     let is_tmpdir_exists = is_mount_point(&tmp_dir).unwrap_or(false) ||
@@ -1600,47 +1572,70 @@ fn main() {
             dir.flatten().any(|entry|entry.path().exists())
         } else { false };
 
-    let child_pid = if reused_mount_point {
-        reused_mount_pid.unwrap_or_else(|| {
-            eprintln!("Warning: reused mount point but could not read PID");
-            exit(1)
-        })
-    } else {
-        match unsafe { fork() } {
+    if is_remp_mount && !is_extract_run && !is_unshare_remp {
+        child_pid = read_mount_pid_file(&tmp_dir, "pid").unwrap_or(Pid::from_raw(0))
+    }
+
+    if !is_tmpdir_exists {
+        if !is_unshare_remp
+            && (is_unshare
+                || get_env_var!("{}_UNSHARE", ENV_NAME) == "1"
+                || !unshare_uid.is_empty()
+                || !unshare_gid.is_empty())
+        {
+            unshare_succeeded = try_unshare(uid, gid, &unshare_uid, &unshare_gid)
+        }
+
+        if (!is_extract_run || is_mount_only) &&
+        !check_fuse(uruntime, uid, gid, &unshare_uid, &unshare_gid, &mut unshare_succeeded) {
+            check_extract!(is_mount_only, uruntime_extract, self_exe, {
+                is_extract_run = true
+            });
+        }
+        drop(unshare_uid); drop(unshare_gid);
+
+        if is_mount_only {
+            is_extract_run = false
+        } else if is_extract_run {
+            is_noclenup = get_env_var!("NO_CLEANUP") == "1"
+        }
+
+        if !is_extract_run && get_env_var!("NO_UNMOUNT") == "1" {
+            is_remp_mount = true;
+            reuse_check_delay = "inf".into()
+        }
+
+        child_pid = match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => child,
             Ok(ForkResult::Child) => {
-                if !is_tmpdir_exists {
-                    try_setsid();
-                    if unshare_succeeded { restore_capabilities() }
-                    if let Err(err) = create_tmp_dirs(tmp_dirs) {
-                        eprintln!("Failed to create tmp dir: {err}");
-                        exit(1)
-                    }
-                    unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) };
-                    if is_extract_run {
-                        extract_image(&embed, &image, tmp_dir, is_extract_run, None)
-                    } else {
-                        mount_image(&embed, &image, tmp_dir, uid, gid)
-                    }
-                } else { exit(0) }
+                try_setsid();
+                if unshare_succeeded { restore_capabilities() }
+                if let Err(err) = create_tmp_dirs(tmp_dirs) {
+                    eprintln!("Failed to create tmp dir: {err}");
+                    exit(1)
+                }
+                unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) };
+                if is_extract_run {
+                    extract_image(&embed, &image, tmp_dir, is_extract_run, None)
+                } else {
+                    mount_image(&embed, &image, tmp_dir, uid, gid)
+                }
                 unreachable!()
             }
             Err(err) => {
                 eprintln!("Fork error: {err}");
                 exit(1)
             }
-        }
-    };
+        };
 
-    if !is_tmpdir_exists {
         if is_extract_run {
             if let Err(err) = waitpid(child_pid, None) {
                 eprintln!("Failed to extract image: {err}");
-                remove_tmp_dirs(tmp_dirs);
+                remove_tmp_dirs(tmp_dirs, unshare_succeeded);
                 exit(1)
             }
         } else if !wait_mount(child_pid, &tmp_dir, Duration::from_secs(1)) {
-            remove_tmp_dirs(tmp_dirs);
+            remove_tmp_dirs(tmp_dirs, unshare_succeeded);
             check_extract!(is_mount_only, uruntime_extract, self_exe, {
                 let err = Command::new(self_exe)
                     .env(format!("{ENV_NAME}_EXTRACT_AND_RUN"), "1")
@@ -1650,15 +1645,15 @@ fn main() {
             });
             exit(1)
         }
-        if is_remp_mount && unshare_succeeded && !is_extract_run {
-            if let Err(err) = write_mount_pid_file(&tmp_dir, child_pid) {
+        if is_remp_mount && !is_extract_run {
+            if let Err(err) = write_mount_pid_file(&tmp_dir, child_pid, unshare_succeeded) {
                 eprintln!("Warning: failed to write PID file: {err}");
             }
         }
-    } else { spawn(move || waitpid(child_pid, None) ); }
+    }
 
     if is_mount_only {
-        if unshare_succeeded && (!is_tmpdir_exists || reused_mount_point) {
+        if unshare_succeeded && (!is_tmpdir_exists || is_unshare_remp) {
             println!("/proc/{child_pid}/root{}", tmp_dir.display())
         } else { println!("{}", tmp_dir.display()) }
     }
@@ -1670,7 +1665,7 @@ fn main() {
                 let run = tmp_dir.join("AppRun");
                 if !run.is_file() {
                     eprintln!("AppRun not found: {:?}", run);
-                    remove_tmp_dirs(tmp_dirs);
+                    remove_tmp_dirs(tmp_dirs, unshare_succeeded);
                     exit(1)
                 }
                 env::set_var("ARGV0", arg0);
@@ -1681,7 +1676,7 @@ fn main() {
                 let run = tmp_dir.join("static").join("bash");
                 if !run.is_file() {
                     eprintln!("Static bash not found: {:?}", run);
-                    remove_tmp_dirs(tmp_dirs);
+                    remove_tmp_dirs(tmp_dirs, unshare_succeeded);
                     exit(1)
                 }
                 exec_args.insert(0, format!("{}/Run.sh", tmp_dir.display()));
@@ -1743,7 +1738,7 @@ fn main() {
                 if is_mount {
                     wait_pid_exit(child_pid, Some(Duration::from_secs(1)));
                 }
-                remove_tmp_dirs(tmp_dirs);
+                remove_tmp_dirs(tmp_dirs, unshare_succeeded);
                 exit(0)
             }
             Err(err) => {
