@@ -327,7 +327,6 @@ fn try_setns(pid: Pid) -> bool {
     let original_cwd = getcwd().ok();
     let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.as_raw() as i64, 0i64) as i32 };
     if pidfd >= 0 {
-        let _ = unsafe { libc::setns(pidfd, libc::CLONE_NEWNS) };
         let result = unsafe { libc::setns(pidfd, libc::CLONE_NEWNS | libc::CLONE_NEWUSER) };
         unsafe { libc::close(pidfd) };
         if result == 0 {
@@ -1557,20 +1556,24 @@ fn main() {
     if get_env_var!("{}_UNSHARE_ROOT", ENV_NAME) == "1" { ("0".into(), "0".into()) }
     else { (get_env_var!("{}_UNSHARE_UID", ENV_NAME), get_env_var!("{}_UNSHARE_GID", ENV_NAME)) };
 
+    let mut is_tmpdir_exists = false;
     let mut is_unshare_remp = false;
     let mut child_pid = Pid::from_raw(0);
     if is_remp_mount && !is_extract_run {
         if let Some(pid) = try_reuse_unshare_mount_point(&tmp_dir) {
+            is_tmpdir_exists = true;
             unshare_succeeded = true;
             is_unshare_remp = true;
             child_pid = pid
         }
     }
 
-    let is_tmpdir_exists = is_mount_point(&tmp_dir).unwrap_or(false) ||
-        if let Ok(dir) = tmp_dir.read_dir() {
-            dir.flatten().any(|entry|entry.path().exists())
-        } else { false };
+    if !is_unshare_remp {
+        is_tmpdir_exists = is_mount_point(&tmp_dir).unwrap_or(false) ||
+            if let Ok(dir) = tmp_dir.read_dir() {
+                dir.flatten().any(|entry|entry.path().exists())
+            } else { false };
+    }
 
     if is_remp_mount && !is_extract_run && !is_unshare_remp {
         child_pid = read_mount_pid_file(&tmp_dir, "pid").unwrap_or(Pid::from_raw(0))
