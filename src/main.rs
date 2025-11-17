@@ -5,9 +5,9 @@ use std::{
     str, path::{PathBuf, Path},
     time::{self, Duration, Instant},
     hash::{DefaultHasher, Hash, Hasher},
-    io::{Error, ErrorKind::{NotFound, InvalidData}, Read, Write, Result, Seek, SeekFrom},
     os::unix::{prelude::PermissionsExt, fs::{symlink, MetadataExt}, process::CommandExt},
-    fs::{self, File, Permissions, create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, set_permissions, read_to_string},
+    io::{Error, ErrorKind::{NotFound, InvalidData, Other}, Read, Write, Result, Seek, SeekFrom},
+    fs::{self, File, Permissions, Metadata, create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, set_permissions, read_to_string},
 };
 
 macro_rules! get_env_var {
@@ -24,12 +24,14 @@ macro_rules! get_env_var {
 
 use cfg_if::cfg_if;
 use which::which_all;
+use nix::fcntl::{open, OFlag};
 use xxhash_rust::xxh3::xxh3_64;
 use goblin::elf::{Elf, SectionHeader};
 use memfd_exec::{MemFdExecutable, Stdio};
-use nix::unistd::{access, fork, setsid, getcwd, AccessFlags, ForkResult, Pid};
 use signal_hook::{consts::{SIGINT, SIGTERM, SIGQUIT, SIGHUP}, iterator::Signals};
-use nix::{libc, sys::{wait::waitpid, signal::{Signal, kill}}, mount::umount, errno::Errno};
+use nix::unistd::{access, fork, setsid, getcwd, close, AccessFlags, ForkResult, Pid};
+use nix::{libc, sys::{wait::waitpid, stat::Mode, signal::{Signal, kill}}, mount::umount, errno::Errno};
+
 
 const _LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const URUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -328,7 +330,7 @@ fn try_setns(pid: Pid) -> bool {
     let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.as_raw() as i64, 0i64) as i32 };
     if pidfd >= 0 {
         let result = unsafe { libc::setns(pidfd, libc::CLONE_NEWNS | libc::CLONE_NEWUSER) };
-        unsafe { libc::close(pidfd) };
+        let _ = close(pidfd);
         if result == 0 {
             restore_capabilities();
             if !try_make_mount_private() {
@@ -373,7 +375,7 @@ fn try_reuse_unshare_mount_point(mount_point: &Path) -> Option<Pid> {
         return None
     }
     if try_setns(pid)
-        && is_mount_point(mount_point).unwrap_or(false) {
+        && is_mounted(mount_point).unwrap_or(false) {
         return Some(pid)
     }
     None
@@ -605,17 +607,61 @@ fn basename(path: &str) -> String {
     pieces.first().unwrap().to_string()
 }
 
+fn is_broken_mount_errno(err: Errno) -> bool {
+    err == Errno::ENOTCONN || err == Errno::ESTALE || err == Errno::EIO
+}
+
+fn get_metadata_or_broken_mount(path: &Path) -> Result<Metadata> {
+    match fs::metadata(path) {
+        Ok(m) => Ok(m),
+        Err(err) => {
+            if let Some(errno) = Errno::from_raw(err.raw_os_error().unwrap_or(0)).into() {
+                if is_broken_mount_errno(errno) {
+                    return Err(Error::new(Other, "broken mount point"))
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
 fn is_mount_point(path: &Path) -> Result<bool> {
-    let full_path = &path.canonicalize().unwrap_or_default();
-    let metadata = fs::metadata(full_path)?;
+    let full_path = &path.canonicalize().unwrap_or(path.into());
+    let metadata = match get_metadata_or_broken_mount(full_path) {
+        Ok(m) => m,
+        Err(err) if err.kind() == Other => return Ok(true),
+        Err(err) => return Err(err),
+    };
     let device_id = metadata.dev();
     match full_path.parent() {
         Some(parent) => {
-            let parent_metadata = fs::metadata(parent)?;
+            let parent_metadata = match get_metadata_or_broken_mount(parent) {
+                Ok(m) => m,
+                Err(err) if err.kind() == Other => return Ok(true),
+                Err(err) => return Err(err),
+            };
             Ok(device_id != parent_metadata.dev())
         }
         None => Ok(false)
     }
+}
+
+fn is_mounted(path: &Path) -> Result<bool> {
+    let is_mount = is_mount_point(path)?;
+    if is_mount {
+        let path = &path.canonicalize()?;
+        match open(path, OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC, Mode::empty()) {
+            Ok(fd) => { let _ = close(fd); }
+            Err(err) => {
+                if is_broken_mount_errno(err) {
+                    try_unmount(None, path);
+                    return Ok(false)
+                }
+                return Err(Error::from(err))
+            }
+        }
+    }
+    Ok(is_mount)
 }
 
 fn get_file_size(path: &PathBuf) -> Result<u64> {
@@ -701,11 +747,10 @@ fn wait_pid_exit(pid: Pid, timeout: Option<Duration>) -> bool {
 }
 
 fn try_unmount(fuse_pid: Option<Pid>, mount_point: &Path) -> bool {
-    if !is_mount_point(mount_point).unwrap_or(false)
-        {
-            eprintln!("{:?}: not mounted!", mount_point);
-            return false
-        }
+    if !is_mount_point(mount_point).unwrap_or(false) {
+        eprintln!("{:?}: not mounted!", mount_point);
+        return false
+    }
 
     let mut is_busy = false;
 
@@ -761,7 +806,7 @@ fn try_unmount(fuse_pid: Option<Pid>, mount_point: &Path) -> bool {
 fn wait_mount(pid: Pid, path: &PathBuf, timeout: Duration) -> bool {
     let start_time = Instant::now();
     spawn(move || waitpid(pid, None) );
-    while !is_mount_point(path).unwrap_or(false) {
+    while !is_mounted(path).unwrap_or(false) {
         if !is_pid_exists(pid) {
             return false
         } else if start_time.elapsed() >= timeout {
@@ -782,7 +827,7 @@ fn try_setsid() {
 
 fn remove_tmp_dirs(dirs: Vec<&PathBuf>, unshare_succeeded: bool) {
     if let Some(dir) = dirs.first() {
-        if !is_mount_point(dir).unwrap_or(false) {
+        if !is_mounted(dir).unwrap_or(false) {
             let pidfile_ext = if !unshare_succeeded { "pid" } else { "un.pid" };
             let pid_file = dir.with_extension(pidfile_ext);
             if pid_file.is_file() { let _ = remove_file(&pid_file); }
@@ -844,9 +889,7 @@ fn get_dwfs_workers(cachesize: &str, cpus: usize) -> String {
 }
 
 fn mount_image(embed: &Embed, image: &Image, mount_dir: PathBuf, uid: u32, gid: u32) {
-    if is_mount_point(&mount_dir).unwrap_or(false) {
-        return
-    }
+    if is_mounted(&mount_dir).unwrap_or(false) { return }
     let mount_dir = mount_dir.to_str().unwrap().to_string();
     let image_path = image.path.to_str().unwrap().to_string();
     if image.is_dwar {
@@ -1569,7 +1612,7 @@ fn main() {
     }
 
     if !is_unshare_remp {
-        is_tmpdir_exists = is_mount_point(&tmp_dir).unwrap_or(false) ||
+        is_tmpdir_exists = is_mounted(&tmp_dir).unwrap_or(false) ||
             if let Ok(dir) = tmp_dir.read_dir() {
                 dir.flatten().any(|entry|entry.path().exists())
             } else { false };
