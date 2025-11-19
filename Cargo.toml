@@ -2,7 +2,7 @@ cargo-features = ["panic-immediate-abort"]
 
 [package]
 name = "uruntime"
-version = "0.5.3"
+version = "0.5.4"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/VHSgunzo/uruntime"

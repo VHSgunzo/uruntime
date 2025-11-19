@@ -10,26 +10,14 @@ use std::{
     fs::{self, File, Permissions, Metadata, create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, set_permissions, read_to_string},
 };
 
-macro_rules! get_env_var {
-    ($var:literal) => {
-        std::env::var($var).unwrap_or_default()
-    };
-    ($($arg:tt)*) => {
-        {
-            let env_name = format!($($arg)*);
-            std::env::var(env_name).unwrap_or_default()
-        }
-    };
-}
-
 use cfg_if::cfg_if;
 use which::which_all;
 use nix::fcntl::{open, OFlag};
 use xxhash_rust::xxh3::xxh3_64;
 use goblin::elf::{Elf, SectionHeader};
 use memfd_exec::{MemFdExecutable, Stdio};
-use signal_hook::{consts::{SIGINT, SIGTERM, SIGQUIT, SIGHUP}, iterator::Signals};
 use nix::unistd::{access, fork, setsid, getcwd, close, AccessFlags, ForkResult, Pid};
+use signal_hook::{consts::{SIGINT, SIGTERM, SIGQUIT, SIGHUP, SIGUSR1, SIGUSR2}, iterator::Signals};
 use nix::{libc, sys::{wait::waitpid, stat::Mode, signal::{Signal, kill}}, mount::umount, errno::Errno};
 
 
@@ -60,6 +48,18 @@ cfg_if! {
         const ENV_NAME: &str = "RUNIMAGE";
         const SELF_NAME: &str = "RunImage";
     }
+}
+
+macro_rules! get_env_var {
+    ($var:literal) => {
+        std::env::var($var).unwrap_or_default()
+    };
+    ($($arg:tt)*) => {
+        {
+            let env_name = format!($($arg)*);
+            std::env::var(env_name).unwrap_or_default()
+        }
+    };
 }
 
 #[repr(C)]
@@ -190,9 +190,16 @@ fn mfd_exec(exec_name: &str, exec_bytes: &[u8], exec_args: Vec<String>) {
     #[cfg(not(feature = "upx"))]
     fn decompress(exec_name: &str, data: &[u8]) -> Vec<u8> {
         if exec_name != "uruntime" {
-            let mut decoder = zstd::stream::read::Decoder::new(data).unwrap();
+            let mut decoder = zstd::stream::read::Decoder::new(data)
+            .unwrap_or_else(|err|{
+                eprintln!("Failed to create decoder for decompress embed exe: {exec_name}: {err}");
+                exit(1)
+            });
             let mut decompressed_data = Vec::new();
-            decoder.read_to_end(&mut decompressed_data).unwrap();
+            decoder.read_to_end(&mut decompressed_data).unwrap_or_else(|err|{
+                eprintln!("Failed to decompress embed exe: {exec_name}: {err}");
+                exit(1)
+            });
             decompressed_data
         } else { data.to_vec() }
     }
@@ -237,7 +244,7 @@ fn add_to_path(path: &PathBuf) {
     if old_path.is_empty() {
         env::set_var("PATH", path)
     } else {
-        let new_path = path.to_str().unwrap();
+        let new_path = path.to_str().unwrap_or_default();
         if !old_path.contains(new_path) {
             env::set_var("PATH", format!("{new_path}:{old_path}"))
         }
@@ -337,8 +344,8 @@ fn try_setns(pid: Pid) -> bool {
                 eprintln!("Warning: failed to make mount private: {}", Error::last_os_error())
             }
             if let Some(cwd) = original_cwd {
-                if let Err(e) = env::set_current_dir(&cwd) {
-                    eprintln!("Warning: failed to restore working directory: {}", e);
+                if let Err(err) = env::set_current_dir(&cwd) {
+                    eprintln!("Warning: failed to restore working directory: {err}");
                 }
             }
             return true
@@ -381,7 +388,12 @@ fn try_reuse_unshare_mount_point(mount_point: &Path) -> Option<Pid> {
     None
 }
 
-fn check_fuse(uruntime: &Path, uid: u32, gid: u32, unshare_uid: &str, unshare_gid: &str, unshare_succeeded: &mut bool) -> bool {
+fn check_fuse(
+    uruntime: &Path,
+    uid: u32, gid: u32,
+    unshare_uid: &str, unshare_gid: &str,
+    unshare_succeeded: &mut bool, is_unshare: &mut bool
+) -> bool {
     if access("/dev/fuse", AccessFlags::R_OK).is_err() ||
        access("/dev/fuse", AccessFlags::W_OK).is_err() {
         return false
@@ -450,6 +462,7 @@ fn check_fuse(uruntime: &Path, uid: u32, gid: u32, unshare_uid: &str, unshare_gi
     }
     if !is_fusermount {
         eprintln!("SUID fusermount not found in PATH, trying to unshare...");
+        *is_unshare = true;
         if try_unshare(uid, gid, unshare_uid, unshare_gid) {
             *unshare_succeeded = true;
             return true
@@ -469,7 +482,7 @@ macro_rules! check_extract {
         $self_exe:expr,
         $true_block:block
     ) => {
-        eprintln!("{}: failed to utilize FUSE during startup!", basename($self_exe.to_str().unwrap()));
+        eprintln!("{}: failed to utilize FUSE during startup!", basename($self_exe.to_str().unwrap_or_default()));
         let self_size = get_file_size($self_exe).unwrap_or_else(|err| {
             eprintln!("Failed to get self size: {err}");
             exit(1)
@@ -561,8 +574,8 @@ fn get_runtime(path: &PathBuf) -> Result<Runtime> {
     let mut file = File::open(path)?;
     let mut elf_header_raw = [0; 64];
     file.read_exact(&mut elf_header_raw)?;
-    let section_table_offset = u64::from_le_bytes(elf_header_raw[40..48].try_into().unwrap()); // e_shoff
-    let section_count = u16::from_le_bytes(elf_header_raw[60..62].try_into().unwrap()); // e_shnum
+    let section_table_offset = u64::from_le_bytes(elf_header_raw[40..48].try_into().unwrap_or_default()); // e_shoff
+    let section_count = u16::from_le_bytes(elf_header_raw[60..62].try_into().unwrap_or_default()); // e_shnum
     let section_table_size = section_count as u64 * 64;
     let required_bytes = section_table_offset + section_table_size;
     let mut headers_bytes = vec![0; required_bytes as usize];
@@ -592,7 +605,7 @@ fn get_runtime(path: &PathBuf) -> Result<Runtime> {
 
 fn random_string(length: usize) -> String {
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_millis();
+    let mut rng = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap_or_default().as_millis();
     let mut result = String::with_capacity(length);
     for _ in 0..length {
         rng = rng.wrapping_mul(48271).wrapping_rem(0x7FFFFFFF);
@@ -604,7 +617,7 @@ fn random_string(length: usize) -> String {
 
 fn basename(path: &str) -> String {
     let pieces: Vec<&str> = path.rsplit('/').collect();
-    pieces.first().unwrap().to_string()
+    pieces.first().copied().unwrap_or_default().to_string()
 }
 
 fn is_broken_mount_errno(err: Errno) -> bool {
@@ -649,7 +662,7 @@ fn is_mount_point(path: &Path) -> Result<bool> {
 fn is_mounted(path: &Path) -> Result<bool> {
     let is_mount = is_mount_point(path)?;
     if is_mount {
-        let path = &path.canonicalize()?;
+        let path = &path.canonicalize().unwrap_or(path.into());
         match open(path, OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC, Mode::empty()) {
             Ok(fd) => { let _ = close(fd); }
             Err(err) => {
@@ -677,7 +690,7 @@ fn is_suid_exe(path: &PathBuf) -> Result<bool> {
 
 fn find_suid_exe(name: &str) -> Option<PathBuf> {
     for path in which_all(name).ok()? {
-        let canonical_path = path.canonicalize().ok()?;
+        let canonical_path = path.canonicalize().unwrap_or(path);
         if is_suid_exe(&canonical_path).unwrap_or(false) {
             return Some(canonical_path)
         }
@@ -747,6 +760,10 @@ fn wait_pid_exit(pid: Pid, timeout: Option<Duration>) -> bool {
 }
 
 fn try_unmount(fuse_pid: Option<Pid>, mount_point: &Path) -> bool {
+    if let Some(fuse_pid) = fuse_pid {
+        sleep(Duration::from_millis(100));
+        if !is_pid_exists(fuse_pid) { return false }
+    }
     if !is_mount_point(mount_point).unwrap_or(false) {
         eprintln!("{:?}: not mounted!", mount_point);
         return false
@@ -756,24 +773,26 @@ fn try_unmount(fuse_pid: Option<Pid>, mount_point: &Path) -> bool {
 
     let res = umount(mount_point);
     if res.is_ok() { return true }
-    else if let Err(e) = res {
-        if e == nix::Error::from(Errno::EBUSY) {
+    else if let Err(err) = res {
+        if err == nix::Error::from(Errno::EBUSY) {
             is_busy = true
         }
     }
 
     fn handle_command(cmd: &str, args: &Vec<&str>) -> (bool, bool) {
-        let res = Command::new(cmd).args(args).output();
-        if let Ok(output) = res {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stdout.is_empty() { println!("{stdout}") }
-            if !stderr.is_empty() { eprintln!("{stderr}") }
-            return (
-                output.status.success(),
-                stderr.to_ascii_lowercase().contains("busy") || stdout.to_ascii_lowercase().contains("busy")
-            )
-        } else { eprintln!("Failed to execute {cmd}: {}", res.err().unwrap()) }
+        match Command::new(cmd).args(args).output() {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stdout.is_empty() { println!("{stdout}") }
+                if !stderr.is_empty() { eprintln!("{stderr}") }
+                return (
+                    output.status.success(),
+                    stderr.to_ascii_lowercase().contains("busy") || stdout.to_ascii_lowercase().contains("busy")
+                )
+            }
+            Err(err) => { eprintln!("Failed to execute {cmd}: {err}") }
+        }
         (false, false)
     }
 
@@ -890,8 +909,8 @@ fn get_dwfs_workers(cachesize: &str, cpus: usize) -> String {
 
 fn mount_image(embed: &Embed, image: &Image, mount_dir: PathBuf, uid: u32, gid: u32) {
     if is_mounted(&mount_dir).unwrap_or(false) { return }
-    let mount_dir = mount_dir.to_str().unwrap().to_string();
-    let image_path = image.path.to_str().unwrap().to_string();
+    let mount_dir = mount_dir.to_str().unwrap_or_default().to_string();
+    let image_path = image.path.to_str().unwrap_or_default().to_string();
     if image.is_dwar {
         #[cfg(feature = "dwarfs")]
         {
@@ -969,7 +988,7 @@ fn extract_image(embed: &Embed, image: &Image, mut extract_dir: PathBuf, is_extr
             }
         }
     }
-    let extract_dir = extract_dir.to_str().unwrap().to_string();
+    let extract_dir = extract_dir.to_str().unwrap_or_default().to_string();
     if let Err(err) = create_dir_all(&extract_dir) {
         eprintln!("Failed to create extract dir: {err}: {extract_dir}");
         exit(1)
@@ -984,7 +1003,7 @@ fn extract_image(embed: &Embed, image: &Image, mut extract_dir: PathBuf, is_extr
             }
         }
     }
-    let image_path = image.path.to_str().unwrap().to_string();
+    let image_path = image.path.to_str().unwrap_or_default().to_string();
     if image.is_dwar {
         #[cfg(feature = "dwarfs")]
         {
@@ -1091,26 +1110,32 @@ fn try_read_dotenv(dotenv_path: &PathBuf, dotenv_string: &str) {
     }
 }
 
-fn signals_handler(pid: Pid, mount_point: &Path, selfexit: bool) {
-    let sig_list = [SIGINT, SIGTERM, SIGQUIT, SIGHUP];
+fn signals_handler(pid: Pid, mount_point: &Path, killpid: bool, selfexit: bool) {
+    let sig_list = [SIGINT, SIGTERM, SIGQUIT, SIGHUP, SIGUSR1, SIGUSR2];
     let mut signals = match Signals::new(sig_list) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to register signal handlers: {e}");
+        Ok(sig) => sig,
+        Err(err) => {
+            eprintln!("Failed to register signal handlers: {err}");
             return
         }
     };
     let _handle = signals.handle();
     for signal in signals.forever() {
         if sig_list.contains(&signal) {
-            try_unmount(Some(pid), mount_point);
-            unsafe {
-                for &sig in sig_list.iter() {
-                    libc::signal(sig, libc::SIG_DFL);
+            if killpid {
+                if let Ok(signal_enum) = Signal::try_from(signal) {
+                    let _ = kill(pid, signal_enum);
+                }
+            } else {
+                try_unmount(Some(pid), mount_point);
+                unsafe {
+                    for &sig in sig_list.iter() {
+                        libc::signal(sig, libc::SIG_DFL);
+                    }
                 }
             }
             if selfexit { exit(0) };
-            break
+            if !killpid { break }
         }
     }
 }
@@ -1361,7 +1386,10 @@ fn main() {
         }
     }
 
-    let uruntime = &current_exe().unwrap();
+    let uruntime = &current_exe().unwrap_or_else(|err|{
+        eprintln!("Failed to get self runtime exe path: {err}");
+        exit(1)
+    });
     let target_image = &PathBuf::from(get_env_var!("TARGET_{}", ENV_NAME));
     let self_exe = if target_image.is_file() { target_image } else { uruntime };
 
@@ -1371,9 +1399,18 @@ fn main() {
     });
     let runtime_size = runtime.size;
 
-    let uruntime_dir = uruntime.parent().unwrap();
-    let self_exe_dir = self_exe.parent().unwrap();
-    let self_exe_name = self_exe.file_name().unwrap().to_str().unwrap();
+    let uruntime_dir = uruntime.parent().unwrap_or_else(||{
+        eprintln!("Failed to get self runtime parent dir!");
+        exit(1)
+    });
+    let self_exe_dir = self_exe.parent().unwrap_or_else(||{
+        eprintln!("Failed to get runtime parent dir!");
+        exit(1)
+    });
+    let self_exe_name = self_exe.file_name().unwrap_or_else(||{
+        eprintln!("Failed to get runtime name!");
+        exit(1)
+    }).to_str().unwrap_or_default();
 
     let portable_home = &self_exe_dir.join(format!("{self_exe_name}.home"));
     let portable_share = &self_exe_dir.join(format!("{self_exe_name}.share"));
@@ -1598,6 +1635,8 @@ fn main() {
     let (unshare_uid, unshare_gid) =
     if get_env_var!("{}_UNSHARE_ROOT", ENV_NAME) == "1" { ("0".into(), "0".into()) }
     else { (get_env_var!("{}_UNSHARE_UID", ENV_NAME), get_env_var!("{}_UNSHARE_GID", ENV_NAME)) };
+    if !unshare_uid.is_empty() || !unshare_gid.is_empty() || get_env_var!("{}_UNSHARE", ENV_NAME) == "1"
+        { is_unshare = true }
 
     let mut is_tmpdir_exists = false;
     let mut is_unshare_remp = false;
@@ -1619,21 +1658,17 @@ fn main() {
     }
 
     if is_remp_mount && !is_extract_run && !is_unshare_remp {
-        child_pid = read_mount_pid_file(&tmp_dir, "pid").unwrap_or(Pid::from_raw(0))
+        child_pid = read_mount_pid_file(&tmp_dir, "pid")
+            .unwrap_or(Pid::from_raw(0))
     }
 
     if !is_tmpdir_exists {
-        if !is_unshare_remp
-            && (is_unshare
-                || get_env_var!("{}_UNSHARE", ENV_NAME) == "1"
-                || !unshare_uid.is_empty()
-                || !unshare_gid.is_empty())
-        {
-            unshare_succeeded = try_unshare(uid, gid, &unshare_uid, &unshare_gid)
+        if !is_unshare_remp && is_unshare {
+            unshare_succeeded = try_unshare(uid, gid, &unshare_uid, &unshare_gid);
         }
 
         if (!is_extract_run || is_mount_only) &&
-        !check_fuse(uruntime, uid, gid, &unshare_uid, &unshare_gid, &mut unshare_succeeded) {
+        !check_fuse(uruntime, uid, gid, &unshare_uid, &unshare_gid, &mut unshare_succeeded, &mut is_unshare) {
             check_extract!(is_mount_only, uruntime_extract, self_exe, {
                 is_extract_run = true
             });
@@ -1682,13 +1717,24 @@ fn main() {
             }
         } else if !wait_mount(child_pid, &tmp_dir, Duration::from_secs(1)) {
             remove_tmp_dirs(tmp_dirs, unshare_succeeded);
-            check_extract!(is_mount_only, uruntime_extract, self_exe, {
-                let err = Command::new(self_exe)
-                    .env(format!("{ENV_NAME}_EXTRACT_AND_RUN"), "1")
-                    .args(&exec_args)
-                    .exec();
-                eprintln!("Failed to exec: {:?}: {err}", self_exe);
-            });
+            let mut cmd = Command::new(self_exe);
+            if !unshare_succeeded && !is_unshare {
+                eprintln!("Trying to unshare...");
+                cmd.env(format!("{ENV_NAME}_UNSHARE"), "1");
+            } else {
+                check_extract!(is_mount_only, uruntime_extract, self_exe, {
+                    eprintln!("Trying to extract and run...");
+                    if is_unshare && !unshare_succeeded {
+                        cmd.env_remove(format!("{ENV_NAME}_UNSHARE"))
+                        .env_remove(format!("{ENV_NAME}_UNSHARE_ROOT"))
+                        .env_remove(format!("{ENV_NAME}_UNSHARE_UID"))
+                        .env_remove(format!("{ENV_NAME}_UNSHARE_GID"));
+                    }
+                    cmd.env(format!("{ENV_NAME}_EXTRACT_AND_RUN"), "1");
+                });
+            }
+            let err = cmd.args(&exec_args).exec();
+            eprintln!("Failed to execute {:?}: {err}", self_exe);
             exit(1)
         }
         if is_remp_mount && !is_extract_run {
@@ -1704,7 +1750,7 @@ fn main() {
         } else { println!("{}", tmp_dir.display()) }
     }
 
-    let mut exit_code = 143;
+    let mut exit_code = 0;
     if !is_mount_only {
         cfg_if! {
             if #[cfg(feature = "appimage")] {
@@ -1732,39 +1778,45 @@ fn main() {
                 env::set_var("RUNOFFSET", format!("{runtime_size}"));
             }
         }
-        env::set_var("OWD", getcwd().unwrap());
+        env::set_var("OWD", getcwd().unwrap_or_default());
 
         try_set_portable_dir(portable_share, "XDG_DATA_HOME", Some(".local/share"));
         try_set_portable_dir(portable_config, "XDG_CONFIG_HOME", Some(".config"));
         try_set_portable_dir(portable_cache, "XDG_CACHE_HOME", Some(".cache"));
         try_set_portable_dir(portable_home, "HOME", None);
 
-        let mut cmd = Command::new(run.canonicalize().unwrap())
-            .args(&exec_args).spawn().unwrap();
-        let pid = Pid::from_raw(cmd.id() as i32);
-        let tmp_dir_clone = tmp_dir.clone();
-        spawn(move || signals_handler(pid, &tmp_dir_clone, false) );
+        match Command::new(run.canonicalize().unwrap_or(run.clone())).args(&exec_args).spawn() {
+            Ok(mut run_child) => {
+                let pid = Pid::from_raw(run_child.id() as i32);
+                let tmp_dir_clone = tmp_dir.clone();
+                spawn(move || signals_handler(pid, &tmp_dir_clone, true, false) );
 
-        if let Ok(status) = cmd.wait() {
-            if let Some(code) = status.code() {
-                exit_code = code
+                if let Ok(status) = run_child.wait() {
+                    if let Some(code) = status.code() {
+                        exit_code = code
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("Failed to execute {:?}: {err}", run);
+                exit_code = 1
             }
         }
     } else if !is_tmpdir_exists {
         let tmp_dir_clone = tmp_dir.clone();
-        spawn(move || signals_handler(child_pid, &tmp_dir_clone, false) );
+        spawn(move || signals_handler(child_pid, &tmp_dir_clone, false, false) );
         wait_pid_exit(child_pid, None);
-    } else { exit(0) }
+    } else { exit(exit_code) }
 
     if is_tmpdir_exists { exit(exit_code) } else {
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child: _ }) => { exit(exit_code) }
             Ok(ForkResult::Child) => {
-            try_setsid();
-            if unshare_succeeded { restore_capabilities() }
+                try_setsid();
+                if unshare_succeeded { restore_capabilities() }
 
                 let tmp_dir_clone = tmp_dir.clone();
-                spawn(move || signals_handler(child_pid, &tmp_dir_clone, true) );
+                spawn(move || signals_handler(child_pid, &tmp_dir_clone, false, true) );
 
                 let is_mount = !is_extract_run && !is_mount_only;
                 let reuse_check_delay = parse_reuse_check_delay(&reuse_check_delay);
