@@ -208,7 +208,6 @@ fn mfd_exec(exec_name: &str, exec_bytes: &[u8], exec_args: Vec<String>) {
 
     let err = MemFdExecutable::new(exec_name, exec_bytes)
         .args(exec_args)
-        .envs(env::vars())
         .exec(Stdio::inherit());
     eprintln!("Failed to execute {exec_name}: {err}");
     exit(1)
@@ -827,6 +826,7 @@ fn wait_mount(pid: Pid, path: &PathBuf, timeout: Duration) -> bool {
     spawn(move || waitpid(pid, None) );
     while !is_mounted(path).unwrap_or(false) {
         if !is_pid_exists(pid) {
+            eprintln!("The mount process ended unexpectedly! PID: {pid}");
             return false
         } else if start_time.elapsed() >= timeout {
             eprintln!("Timeout reached while waiting for mount: {:?}", path);
