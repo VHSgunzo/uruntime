@@ -208,6 +208,7 @@ fn mfd_exec(exec_name: &str, exec_bytes: &[u8], exec_args: Vec<String>) {
 
     let err = MemFdExecutable::new(exec_name, exec_bytes)
         .args(exec_args)
+        .envs(env::vars_os())
         .exec(Stdio::inherit());
     eprintln!("Failed to execute {exec_name}: {err}");
     exit(1)
