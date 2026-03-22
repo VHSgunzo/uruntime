@@ -1529,6 +1529,7 @@ fn main() {
 
     let image = get_image(self_exe, runtime_size).unwrap_or_else(|err|{
         eprintln!("Failed to get image: {err}");
+        eprintln!("Maybe the image was corrupted because you used the strip on me?");
         exit(1)
     });
 
