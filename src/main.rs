@@ -999,8 +999,7 @@ fn extract_image(embed: &Embed, image: &Image, mut extract_dir: PathBuf, is_extr
         if !is_extract_run {
             let _ = remove_file(&applink_dir);
             if let Err(err) = symlink(&extract_dir, &applink_dir) {
-                eprintln!("Failed to create squashfs-root symlink to extract dir: {err}");
-                exit(1)
+                eprintln!("Warning: failed to create squashfs-root symlink to extract dir: {err}");
             }
         }
     }
@@ -1529,7 +1528,7 @@ fn main() {
 
     let image = get_image(self_exe, runtime_size).unwrap_or_else(|err|{
         eprintln!("Failed to get image: {err}");
-        eprintln!("Maybe the image was corrupted because you used the strip on me?");
+        eprintln!("The embedded filesystem image may be corrupted, truncated by 'strip', or not yet included in this executable");
         exit(1)
     });
 
@@ -1590,7 +1589,11 @@ fn main() {
         tmp_dir = env::temp_dir();
         let mut self_hash = "".to_string();
         let first5name: String = self_exe_name.split(".").next()
-        .unwrap_or(self_exe_name).chars().take(5).collect();
+        .unwrap_or(self_exe_name)
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(5)
+            .collect();
         if is_extract_run || is_remp_mount {
             self_hash = hash_string(&(
                 xxh3_64(&runtime.headers_bytes) as u32 +
