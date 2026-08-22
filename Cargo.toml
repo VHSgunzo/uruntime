@@ -2,7 +2,7 @@ cargo-features = ["panic-immediate-abort"]
 
 [package]
 name = "uruntime"
-version = "0.5.9"
+version = "0.6.1"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/VHSgunzo/uruntime"
@@ -33,18 +33,18 @@ appimage = []
 
 [build-dependencies]
 cfg-if = "1.0.4"
-indexmap = "2.12.0"
+indexmap = "2.14.0"
 zstd = { version = "0.13.3", default-features = false }
 
 [dependencies]
-which = "8.0.0"
-cfg-if = "1.0.0"
-goblin = "0.10.3"
+which = "8.0.5"
+cfg-if = "1.0.4"
+goblin = "0.10.7"
 procfs = "0.18.0"
 num_cpus = "1.17.0"
-signal-hook = "0.4.3"
+signal-hook = "0.4.4"
 zstd = { version = "0.13.3", default-features = false }
-xxhash-rust = { version = "0.8.15", features = [ "xxh3" ] }
-nix = { version = "0.31.2", features = [ "fs", "signal", "mount" ] }
+xxhash-rust = { version = "0.8.18", features = [ "xxh3" ] }
+nix = { version = "0.31.3", features = [ "fs", "signal", "mount" ] }
 dotenv = { git = "https://github.com/VHSgunzo/dotenv.git" }
 memfd-exec = { git = "https://github.com/VHSgunzo/memfd-exec.git" }
