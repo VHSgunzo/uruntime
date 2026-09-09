@@ -223,5 +223,3 @@ gh release view v0.7.1
 ```
 
 The expected asset count is `54`. CI performs the same check automatically and publishes the release only after the complete manifest matches.
-
-For the release that completes RISC-V support, also confirm that all nine `*-riscv64` files are present. Comment on and close issue #20 only after reading back the published release.

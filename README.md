@@ -1,4 +1,4 @@
-# uruntime 0.7.0
+# uruntime
 
 `uruntime` is a static runtime for [RunImage](https://github.com/VHSgunzo/runimage) and [AppImage](https://appimage.org/). It detects an appended [SquashFS](https://docs.kernel.org/filesystems/squashfs.html) or [DwarFS](https://github.com/mhx/dwarfs) image, mounts it through FUSE, or extracts it and runs the application without FUSE.
 
@@ -64,7 +64,7 @@ Filesystem helpers are stored inside the runtime in Zstd-compressed form and exe
 
 `ppc64` and `ppc64le` share the Rust `target_arch` value `powerpc64`, so runtimes and helpers are selected by the complete Rust target. Big-endian and little-endian artifacts are not interchangeable.
 
-All six targets are implemented in `build.rs`, `xtask`, and the CI matrix. At the time v0.7.0 was prepared, full release CI validation for all six architectures had not yet completed. A target's presence in this table does not mean that all 54 artifacts for the new release have already been published and verified.
+All six targets are implemented in `build.rs`, `xtask`, and the CI matrix. Every release workflow builds and validates the complete 54-artifact matrix before publication.
 
 ## Runtime variants
 
@@ -86,27 +86,18 @@ Lite variants retain the tools needed for mounting and extraction. Full variants
 
 ## Projects using uruntime
 
-The following projects have public build scripts that confirm direct use of `uruntime` or use through `quick-sharun`:
-
-- [AnyLinux-AppImages](https://github.com/pkgforge-dev/Anylinux-AppImages/blob/main/useful-tools/quick-sharun.sh#L3853-L3855), a collection of scripts and AppImage builds for different Linux systems.
-- [GOverlay](https://github.com/benjamimgois/goverlay/blob/main/appimage/goverlay-appimage.sh#L101-L102), a graphical configuration tool for MangoHud, vkBasalt, and other gaming tools.
-- [Ghostty AppImage](https://github.com/pkgforge-dev/ghostty-appimage/blob/main/bin/bundle-appimage.sh#L9-L18), an AppImage build of the Ghostty terminal.
-- [Interstellar](https://github.com/interstellar-app/interstellar/blob/main/scripts/build-appimage.sh#L10-L45), a client for Mbin, Lemmy, and PieFed.
-- [QDiskInfo](https://github.com/edisionnano/QDiskInfo/blob/main/qdiskinfo-appimage.sh#L70-L73), a graphical interface for `smartctl` and drive SMART data.
-- [CPU-X](https://github.com/TheTumultuousUnicornOfDarkness/CPU-X/blob/master/scripts/build_appimage.sh#L132-L139), a viewer for processor, motherboard, and other hardware information.
-- [Eden](https://git.eden-emu.dev/eden-emu/eden/src/commit/1f091191f2d28289c6f7d237ea9f1fd6dd2333cd/.ci/package-appimage.sh), a Nintendo Switch emulator.
-- [PPSSPP](https://github.com/hrydgard/ppsspp/blob/master/scripts/makeappimage_64-bit.sh#L24-L26), a PlayStation Portable emulator.
-- [RPCS3](https://github.com/RPCS3/rpcs3/blob/master/.ci/deploy-linux.sh#L57-L60), a PlayStation 3 emulator.
-- [Converseen](https://github.com/Faster3ck/Converseen/blob/main/package/AppImage/converseen-appimage.sh#L53-L55), a batch image conversion and resizing tool.
-- [MangoJuice](https://github.com/radiolamp/mangojuice/releases/tag/1.0.0), a graphical configuration tool for MangoHud.
-- [RSS Guard](https://github.com/martinrotter/rssguard/releases/tag/5.2.5), a client for RSS, Atom, and other feed formats.
-
-For MangoJuice and RSS Guard, the evidence comes from the official release AppImages themselves rather than a reference to `quick-sharun` in source code. The files were inspected without executing them:
-
-| Project | Tag and file | SHA-256 | Evidence |
-|---|---|---|---|
-| MangoJuice | [`1.0.0 / MangoJuice-1.0.0-x86_64.AppImage`](https://github.com/radiolamp/mangojuice/releases/download/1.0.0/MangoJuice-1.0.0-x86_64.AppImage) | `3b603eca0aff333c5606faad2913020397858bc4842089493e00992bb6b0ec73` | ELF64 x86-64, AppImage magic `AI\x02`; string `Repository: https://github.com/VHSgunzo/uruntime` at offset 348459. |
-| RSS Guard | [`5.2.5 / rssguard-5.2.5-text-qt5-linux64.AppImage`](https://github.com/martinrotter/rssguard/releases/download/5.2.5/rssguard-5.2.5-text-qt5-linux64.AppImage) | `f5641941bce03b259647c30513b730770b099d5fef6accb32d208ed990702ed7` | ELF64 x86-64, AppImage magic `AI\x02`; string `Repository: https://github.com/VHSgunzo/uruntime` at offset 348459. |
+- [AnyLinux-AppImages](https://github.com/pkgforge-dev/Anylinux-AppImages) — a collection of AppImage build scripts for many Linux applications.
+- [GOverlay](https://github.com/benjamimgois/goverlay) — a graphical configurator for MangoHud, vkBasalt, and related gaming tools.
+- [Ghostty AppImage](https://github.com/pkgforge-dev/ghostty-appimage) — a portable AppImage build of the Ghostty terminal.
+- [Interstellar](https://github.com/interstellar-app/interstellar) — a client for Mbin, Lemmy, and PieFed.
+- [QDiskInfo](https://github.com/edisionnano/QDiskInfo) — a graphical frontend for `smartctl` and drive SMART data.
+- [CPU-X](https://github.com/TheTumultuousUnicornOfDarkness/CPU-X) — a system information and hardware monitoring application.
+- [Eden](https://git.eden-emu.dev/eden-emu/eden) — a Nintendo Switch emulator.
+- [PPSSPP](https://github.com/hrydgard/ppsspp) — a PlayStation Portable emulator.
+- [RPCS3](https://github.com/RPCS3/rpcs3) — a PlayStation 3 emulator.
+- [Converseen](https://github.com/Faster3ck/Converseen) — a batch image conversion and resizing application.
+- [MangoJuice](https://github.com/radiolamp/mangojuice) — a graphical configuration tool for MangoHud.
+- [RSS Guard](https://github.com/martinrotter/rssguard) — a desktop client for RSS, Atom, and other feed formats.
 
 ## Getting a prebuilt runtime
 
