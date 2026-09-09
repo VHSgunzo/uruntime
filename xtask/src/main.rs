@@ -828,6 +828,10 @@ fn update_checksums(check: bool) -> Result<(), DynError> {
         fs::read(&destination)
             .map_err(|error| format!("failed to read {}: {error}", destination.display()))
     };
+    eprintln!(
+        "validating Zig {ZIG_VERSION} metadata for {} supported Linux hosts from {ZIG_INDEX_URL}",
+        ZIG_PLATFORMS.len()
+    );
     let zig_index_path = temporary.path().join("zig-index.json");
     build_support::download_atomic(&curl, ZIG_INDEX_URL, &zig_index_path)
         .map_err(|error| -> DynError { error.into() })?;
