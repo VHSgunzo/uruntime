@@ -22,11 +22,21 @@ if [[ "$URUNTIME_ZIG_TARGET" != "$expected" ]]; then
 fi
 
 rust_crt_dir="$URUNTIME_RUST_SYSROOT/lib/rustlib/$URUNTIME_RUST_TARGET/lib/self-contained"
+rust_target_lib_dir="$URUNTIME_RUST_SYSROOT/lib/rustlib/$URUNTIME_RUST_TARGET/lib"
 args=()
 skip_target_value=false
+pending_library_dir=false
 for arg in "$@"; do
   if $skip_target_value; then
     skip_target_value=false
+    continue
+  fi
+  if $pending_library_dir; then
+    pending_library_dir=false
+    if [[ "$arg" == "$rust_target_lib_dir" && ! -d "$arg" ]]; then
+      continue
+    fi
+    args+=("-L" "$arg")
     continue
   fi
   case "$arg" in
@@ -34,6 +44,12 @@ for arg in "$@"; do
       skip_target_value=true
       ;;
     --target=*|-target=*)
+      ;;
+    -L)
+      pending_library_dir=true
+      ;;
+    -L"$rust_target_lib_dir")
+      [[ -d "$rust_target_lib_dir" ]] && args+=("$arg")
       ;;
     -Wl,--fix-cortex-a53-843419)
       ;;
@@ -48,6 +64,10 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if $pending_library_dir; then
+  args+=("-L")
+fi
 
 zig=${URUNTIME_ZIG:-zig}
 exec "$zig" cc -target "$URUNTIME_ZIG_TARGET" "${args[@]}"

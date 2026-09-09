@@ -282,6 +282,13 @@ fn zig_wrapper_maps_all_targets_and_filters_rust_gnu_only_link_args() {
                     .display()
                     .to_string(),
                 "-lc".into(),
+                "-L".into(),
+                rust_sysroot
+                    .join("lib/rustlib")
+                    .join(arch.rust_target)
+                    .join("lib")
+                    .display()
+                    .to_string(),
                 "-Lkeep-me".into(),
                 "/checkout/self-contained/keep.o".into(),
                 "-Wl,--wrap=contains--fix-cortex-a53-843419-text".into(),
@@ -292,6 +299,14 @@ fn zig_wrapper_maps_all_targets_and_filters_rust_gnu_only_link_args() {
         let actual = fs::read_to_string(log).unwrap();
         assert!(actual.starts_with(&format!("cc\n-target\n{}\n", arch.zig_target)));
         assert!(actual.contains("-Lkeep-me\n"));
+        assert!(!actual.contains(
+            rust_sysroot
+                .join("lib/rustlib")
+                .join(arch.rust_target)
+                .join("lib")
+                .to_string_lossy()
+                .as_ref()
+        ));
         assert!(actual.contains("/checkout/self-contained/keep.o\n"));
         assert!(actual.contains("-Wl,--wrap=contains--fix-cortex-a53-843419-text\n"));
         assert!(!actual
