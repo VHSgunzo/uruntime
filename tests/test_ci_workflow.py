@@ -43,6 +43,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("cargo --locked xtask check", combined)
         self.assertIn("python3 -m unittest discover -s tests -p 'test_ci_*.py' -v", combined)
         self.assertIn("python3-yaml", runs[1])
+        self.assertIn("llvm", runs[1])
         self.assertNotIn("cargo --locked fmt --check", combined)
         self.assertNotIn("cargo --locked xtask update-checksums --check", combined)
         self.assertNotIn("qemu", combined.lower())
