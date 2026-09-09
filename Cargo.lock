@@ -512,7 +512,7 @@ checksum = "462eeb75aeb73aea900253ce739c8e18a67423fadf006037cd3ff27e82748a06"
 
 [[package]]
 name = "uruntime"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "cfg-if",
  "dotenv",

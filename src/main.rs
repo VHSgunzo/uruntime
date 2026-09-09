@@ -121,85 +121,80 @@ struct Image {
 #[derive(Debug)]
 struct Embed {
     #[cfg(feature = "squashfs")]
-    squashfuse: Vec<u8>,
+    squashfuse: &'static [u8],
     #[cfg(feature = "squashfs")]
-    unsquashfs: Vec<u8>,
+    unsquashfs: &'static [u8],
     #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
-    mksquashfs: Vec<u8>,
+    mksquashfs: &'static [u8],
     #[cfg(feature = "dwarfs")]
-    dwarfs_universal: Vec<u8>,
+    dwarfs_universal: &'static [u8],
 }
 
 impl Embed {
     fn new() -> Self {
         Embed {
             #[cfg(feature = "squashfs")]
-            squashfuse: include_bytes!(concat!(env!("URUNTIME_HELPER_DIR"), "/squashfuse-zst"))
-                .to_vec(),
+            squashfuse: include_bytes!(concat!(env!("URUNTIME_HELPER_DIR"), "/squashfuse-zst")),
             #[cfg(feature = "squashfs")]
-            unsquashfs: include_bytes!(concat!(env!("URUNTIME_HELPER_DIR"), "/unsquashfs-zst"))
-                .to_vec(),
+            unsquashfs: include_bytes!(concat!(env!("URUNTIME_HELPER_DIR"), "/unsquashfs-zst")),
             #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
-            mksquashfs: include_bytes!(concat!(env!("URUNTIME_HELPER_DIR"), "/mksquashfs-zst"))
-                .to_vec(),
+            mksquashfs: include_bytes!(concat!(env!("URUNTIME_HELPER_DIR"), "/mksquashfs-zst")),
             #[cfg(all(feature = "lite", feature = "dwarfs"))]
             dwarfs_universal: include_bytes!(concat!(
                 env!("URUNTIME_HELPER_DIR"),
                 "/dwarfs-fuse-extract-zst"
-            ))
-            .to_vec(),
+            )),
             #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
             dwarfs_universal: include_bytes!(concat!(
                 env!("URUNTIME_HELPER_DIR"),
                 "/dwarfs-universal-zst"
-            ))
-            .to_vec(),
+            )),
         }
     }
 
     #[cfg(feature = "squashfs")]
     fn squashfuse(&self, exec_args: Vec<String>) {
-        mfd_exec("squashfuse", &self.squashfuse, exec_args);
+        mfd_exec("squashfuse", self.squashfuse, exec_args);
     }
 
     #[cfg(feature = "squashfs")]
     fn unsquashfs(&self, exec_args: Vec<String>) {
-        mfd_exec("unsquashfs", &self.unsquashfs, exec_args);
+        mfd_exec("unsquashfs", self.unsquashfs, exec_args);
     }
 
     #[cfg(feature = "squashfs")]
     fn sqfscat(&self, exec_args: Vec<String>) {
-        mfd_exec("sqfscat", &self.unsquashfs, exec_args);
+        mfd_exec("sqfscat", self.unsquashfs, exec_args);
     }
 
     #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
     fn mksquashfs(&self, exec_args: Vec<String>) {
-        mfd_exec("mksquashfs", &self.mksquashfs, exec_args);
+        mfd_exec("mksquashfs", self.mksquashfs, exec_args);
     }
 
     #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
     fn sqfstar(&self, exec_args: Vec<String>) {
-        mfd_exec("sqfstar", &self.mksquashfs, exec_args);
+        mfd_exec("sqfstar", self.mksquashfs, exec_args);
     }
 
     #[cfg(feature = "dwarfs")]
     fn dwarfs(&self, exec_args: Vec<String>) {
-        mfd_exec("dwarfs", &self.dwarfs_universal, exec_args);
+        mfd_exec("dwarfs", self.dwarfs_universal, exec_args);
     }
 
     #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
     fn dwarfsck(&self, exec_args: Vec<String>) {
-        mfd_exec("dwarfsck", &self.dwarfs_universal, exec_args);
+        mfd_exec("dwarfsck", self.dwarfs_universal, exec_args);
     }
 
     #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
     fn mkdwarfs(&self, exec_args: Vec<String>) {
-        mfd_exec("mkdwarfs", &self.dwarfs_universal, exec_args);
+        mfd_exec("mkdwarfs", self.dwarfs_universal, exec_args);
     }
 
     #[cfg(feature = "dwarfs")]
     fn dwarfsextract(&self, exec_args: Vec<String>) {
-        mfd_exec("dwarfsextract", &self.dwarfs_universal, exec_args);
+        mfd_exec("dwarfsextract", self.dwarfs_universal, exec_args);
     }
 }
 
@@ -240,7 +235,7 @@ fn mfd_exec(exec_name: &str, exec_bytes: &[u8], exec_args: Vec<String>) {
     exit(1)
 }
 
-fn get_image(path: &PathBuf, offset: u64) -> Result<Image> {
+fn get_image(path: &Path, offset: u64) -> Result<Image> {
     let mut file = File::open(path)?;
     let mut buff = [0u8; 4];
     file.seek(SeekFrom::Start(offset))?;
@@ -252,10 +247,9 @@ fn get_image(path: &PathBuf, offset: u64) -> Result<Image> {
         is_squash: false,
     };
     if bytes_read == 4 {
-        let read_str = String::from_utf8_lossy(&buff);
-        if read_str.contains("DWAR") {
+        if buff == *b"DWAR" {
             image.is_dwar = true
-        } else if read_str.contains("hsqs") {
+        } else if buff == *b"hsqs" {
             image.is_squash = true
         }
     }
@@ -349,6 +343,12 @@ fn environment_drop_caps_policy(value: &str) -> (bool, bool, bool) {
     }
 }
 
+fn is_runtime_option(arg: &str, option: &str) -> bool {
+    arg.strip_prefix("--")
+        .and_then(|arg| arg.strip_prefix(ARG_PFX))
+        .is_some_and(|arg| arg.strip_prefix('-') == Some(option))
+}
+
 #[derive(Debug, Default, Eq, PartialEq)]
 struct UnshareCliOptions {
     enable: bool,
@@ -364,26 +364,35 @@ fn parse_unshare_cli_options(
     prefix: &str,
 ) -> std::result::Result<UnshareCliOptions, String> {
     let base = format!("--{prefix}-unshare");
+    if !args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg.starts_with(&base))
+    {
+        return Ok(UnshareCliOptions::default());
+    }
     let mut options = UnshareCliOptions::default();
     let mut retained = Vec::with_capacity(args.len());
-    let mut index = 0;
-    while index < args.len() {
-        let arg = &args[index];
+    let mut input = args.clone().into_iter();
+    while let Some(arg) = input.next() {
         if arg == "--" {
-            retained.extend(args[index..].iter().cloned());
+            retained.push(arg);
+            retained.extend(input);
             break;
         }
-        let value_option = if arg == &format!("{base}-uid") {
-            Some(("uid", args.get(index + 1).cloned(), true))
-        } else if let Some(value) = arg.strip_prefix(&format!("{base}-uid=")) {
-            Some(("uid", Some(value.to_string()), false))
-        } else if arg == &format!("{base}-gid") {
-            Some(("gid", args.get(index + 1).cloned(), true))
-        } else {
-            arg.strip_prefix(&format!("{base}-gid="))
-                .map(|value| ("gid", Some(value.to_string()), false))
+        let suffix = arg.strip_prefix(&base);
+        let value_option = match suffix {
+            Some("-uid") => Some(("uid", input.next())),
+            Some(suffix) if suffix.starts_with("-uid=") => {
+                Some(("uid", Some(suffix[5..].to_string())))
+            }
+            Some("-gid") => Some(("gid", input.next())),
+            Some(suffix) if suffix.starts_with("-gid=") => {
+                Some(("gid", Some(suffix[5..].to_string())))
+            }
+            _ => None,
         };
-        if let Some((kind, value, consumes_next)) = value_option {
+        if let Some((kind, value)) = value_option {
             let value = value.ok_or_else(|| format!("{arg} requires a numeric value"))?;
             value
                 .parse::<u32>()
@@ -394,23 +403,21 @@ fn parse_unshare_cli_options(
                 options.gid = Some(value);
             }
             options.enable = true;
-            index += 1 + usize::from(consumes_next);
             continue;
         }
-        if arg == &base {
+        if suffix == Some("") {
             options.enable = true;
-        } else if arg == &format!("{base}-root") {
+        } else if suffix == Some("-root") {
             options.enable = true;
             options.root = true;
-        } else if arg == &format!("{base}-drop-caps") {
+        } else if suffix == Some("-drop-caps") {
             options.enable = true;
             options.drop_caps = true;
-        } else if arg == &format!("{base}-fallback-drop-caps") {
+        } else if suffix == Some("-fallback-drop-caps") {
             options.drop_caps_on_fallback = true;
         } else {
-            retained.push(arg.clone());
+            retained.push(arg);
         }
-        index += 1;
     }
     if options.drop_caps_on_fallback && options.enable {
         options.drop_caps = true;
@@ -657,9 +664,7 @@ fn check_fuse(
     unshare_succeeded: &mut bool,
     is_unshare: &mut bool,
 ) -> bool {
-    if access("/dev/fuse", AccessFlags::R_OK).is_err()
-        || access("/dev/fuse", AccessFlags::W_OK).is_err()
-    {
+    if access("/dev/fuse", AccessFlags::R_OK | AccessFlags::W_OK).is_err() {
         return false;
     }
     if uid == 0 || *unshare_succeeded || is_in_user_and_mount_namespace() {
@@ -722,7 +727,7 @@ fn check_fuse(
         if !create_fusermount_dir(tmp_path_dir) {
             exit(1)
         }
-        if !create_fusermount_symlink(tmp_path_dir, fusermount_prog, &basename(fusermount_prog)) {
+        if !create_fusermount_symlink(tmp_path_dir, fusermount_prog, basename(fusermount_prog)) {
             exit(1)
         }
     } else {
@@ -918,9 +923,8 @@ fn random_string(length: usize) -> String {
     result
 }
 
-fn basename(path: &str) -> String {
-    let pieces: Vec<&str> = path.rsplit('/').collect();
-    pieces.first().copied().unwrap_or_default().to_string()
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or_default()
 }
 
 fn is_broken_mount_errno(err: Errno) -> bool {
@@ -1551,9 +1555,9 @@ fn hash_string(data: &str) -> String {
     hasher.finish().to_string()
 }
 
-fn fast_hash_file(path: &PathBuf, offset: u64) -> Result<u32> {
+fn fast_hash_file(path: &Path, offset: u64) -> Result<u32> {
     let mut file = File::open(path)?;
-    let file_size = get_file_size(path)?.saturating_sub(offset);
+    let file_size = file.metadata()?.len().saturating_sub(offset);
     let mut buffer = [0u8; 48];
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(&mut buffer[0..16])?;
@@ -1699,11 +1703,12 @@ fn print_usage(
 fn main() {
     let embed = Embed::new();
 
-    let mut exec_args: Vec<String> = env::args().collect();
-    let arg0 = &exec_args.remove(0);
-    let arg0_name = &basename(arg0);
+    let mut args = env::args();
+    let arg0 = args.next().unwrap_or_default();
+    let mut exec_args: Vec<String> = args.collect();
+    let arg0_name = basename(&arg0);
 
-    match arg0_name.as_str() {
+    match arg0_name {
         #[cfg(feature = "squashfs")]
         "squashfuse" => {
             embed.squashfuse(exec_args);
@@ -1785,60 +1790,56 @@ fn main() {
         eprintln!("Invalid unshare option: {error}");
         exit(2)
     });
-    let arg1 = if !exec_args.is_empty() {
-        exec_args[0].to_string()
-    } else {
-        "".into()
-    };
+    let arg1 = exec_args.first().map(String::as_str).unwrap_or_default();
 
     if !arg1.is_empty() {
         match arg1 {
-            arg if arg == format!("--{ARG_PFX}-version") => {
+            arg if is_runtime_option(arg, "version") => {
                 println!("v{URUNTIME_VERSION}");
                 return;
             }
             #[cfg(feature = "squashfs")]
-            arg if arg == format!("--{ARG_PFX}-squashfuse") => {
+            arg if is_runtime_option(arg, "squashfuse") => {
                 embed.squashfuse(exec_args[1..].to_vec());
                 return;
             }
             #[cfg(feature = "squashfs")]
-            arg if arg == format!("--{ARG_PFX}-unsquashfs") => {
+            arg if is_runtime_option(arg, "unsquashfs") => {
                 embed.unsquashfs(exec_args[1..].to_vec());
                 return;
             }
             #[cfg(feature = "squashfs")]
-            arg if arg == format!("--{ARG_PFX}-sqfscat") => {
+            arg if is_runtime_option(arg, "sqfscat") => {
                 embed.sqfscat(exec_args[1..].to_vec());
                 return;
             }
             #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
-            arg if arg == format!("--{ARG_PFX}-mksquashfs") => {
+            arg if is_runtime_option(arg, "mksquashfs") => {
                 embed.mksquashfs(exec_args[1..].to_vec());
                 return;
             }
             #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
-            arg if arg == format!("--{ARG_PFX}-sqfstar") => {
+            arg if is_runtime_option(arg, "sqfstar") => {
                 embed.sqfstar(exec_args[1..].to_vec());
                 return;
             }
             #[cfg(feature = "dwarfs")]
-            arg if arg == format!("--{ARG_PFX}-dwarfs") => {
+            arg if is_runtime_option(arg, "dwarfs") => {
                 embed.dwarfs(exec_args[1..].to_vec());
                 return;
             }
             #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
-            arg if arg == format!("--{ARG_PFX}-dwarfsck") => {
+            arg if is_runtime_option(arg, "dwarfsck") => {
                 embed.dwarfsck(exec_args[1..].to_vec());
                 return;
             }
             #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
-            arg if arg == format!("--{ARG_PFX}-mkdwarfs") => {
+            arg if is_runtime_option(arg, "mkdwarfs") => {
                 embed.mkdwarfs(exec_args[1..].to_vec());
                 return;
             }
             #[cfg(feature = "dwarfs")]
-            arg if arg == format!("--{ARG_PFX}-dwarfsextract") => {
+            arg if is_runtime_option(arg, "dwarfsextract") => {
                 embed.dwarfsextract(exec_args[1..].to_vec());
                 return;
             }
@@ -1850,8 +1851,9 @@ fn main() {
         eprintln!("Failed to get self runtime exe path: {err}");
         exit(1)
     });
-    let target_image = &PathBuf::from(get_env_var!("TARGET_{}", ENV_NAME));
-    let self_exe = if target_image.is_file() {
+    let target_image_value = get_env_var!("TARGET_{}", ENV_NAME);
+    let target_image = &PathBuf::from(&target_image_value);
+    let self_exe = if !target_image_value.is_empty() && target_image.is_file() {
         target_image
     } else {
         uruntime
@@ -1893,25 +1895,25 @@ fn main() {
 
     let mut is_mount_only = false;
     let mut is_extract_run = false;
-    let mut is_noclenup = !matches!(
-        URUNTIME_CLEANUP.replace("URUNTIME_CLEANUP=", "=").as_str(),
-        "=1"
-    );
-    let unshare_mode = URUNTIME_UNSHARE.replace("URUNTIME_UNSHARE=", "=");
+    let mut is_noclenup = URUNTIME_CLEANUP.strip_prefix("URUNTIME_CLEANUP") != Some("=1");
+    let unshare_mode = URUNTIME_UNSHARE
+        .strip_prefix("URUNTIME_UNSHARE")
+        .unwrap_or_default();
     let (mut is_unshare, mut drop_caps, mut drop_caps_on_fallback) =
-        embedded_unshare_policy(&unshare_mode);
+        embedded_unshare_policy(unshare_mode);
     is_unshare |= unshare_cli.enable;
     drop_caps |= unshare_cli.drop_caps;
     drop_caps_on_fallback |= unshare_cli.drop_caps_on_fallback;
-    let arg1 = exec_args.first().cloned().unwrap_or_default();
-
     if get_env_var!("{}_EXTRACT_AND_RUN", ENV_NAME) == "1" {
         is_extract_run = true
     }
 
+    let arg1 = exec_args.first().map(String::as_str).unwrap_or_default();
+    let extract_and_run = is_runtime_option(arg1, "extract-and-run");
+    let explicit_unshare = is_runtime_option(arg1, "unshare");
     if !arg1.is_empty() {
         match arg1 {
-            arg if arg == format!("--{ARG_PFX}-help") => {
+            arg if is_runtime_option(arg, "help") => {
                 print_usage(
                     portable_home,
                     portable_share,
@@ -1921,7 +1923,7 @@ fn main() {
                 );
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-portable-home") => {
+            arg if is_runtime_option(arg, "portable-home") => {
                 if let Err(err) = create_dir(portable_home) {
                     eprintln!(
                         "Failed to create portable home directory: {:?}: {err}",
@@ -1931,7 +1933,7 @@ fn main() {
                 println!("Portable home directory created: {:?}", portable_home);
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-portable-share") => {
+            arg if is_runtime_option(arg, "portable-share") => {
                 if let Err(err) = create_dir(portable_share) {
                     eprintln!(
                         "Failed to create portable share directory: {:?}: {err}",
@@ -1941,7 +1943,7 @@ fn main() {
                 println!("Portable share directory created: {:?}", portable_share);
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-portable-config") => {
+            arg if is_runtime_option(arg, "portable-config") => {
                 if let Err(err) = create_dir(portable_config) {
                     eprintln!(
                         "Failed to create portable config directory: {:?}: {err}",
@@ -1951,7 +1953,7 @@ fn main() {
                 println!("Portable config directory created: {:?}", portable_config);
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-portable-cache") => {
+            arg if is_runtime_option(arg, "portable-cache") => {
                 if let Err(err) = create_dir(portable_cache) {
                     eprintln!(
                         "Failed to create portable cache directory: {:?}: {err}",
@@ -1961,12 +1963,12 @@ fn main() {
                 println!("Portable cache directory created: {:?}", portable_cache);
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-offset") => {
+            arg if is_runtime_option(arg, "offset") => {
                 println!("{runtime_size}");
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-updateinfo")
-                || arg == format!("--{ARG_PFX}-updateinformation") =>
+            arg if is_runtime_option(arg, "updateinfo")
+                || is_runtime_option(arg, "updateinformation") =>
             {
                 let updateinfo = get_section_data(&runtime.headers_bytes, ".upd_info")
                     .unwrap_or_else(|err| {
@@ -1976,14 +1978,14 @@ fn main() {
                 println!("{updateinfo}");
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-addupdinfo") => {
+            arg if is_runtime_option(arg, "addupdinfo") => {
                 if let Err(err) = add_section_data(&runtime, ".upd_info", &exec_args) {
                     eprintln!("Failed to add update info: {err}");
                     exit(1)
                 };
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-signature") => {
+            arg if is_runtime_option(arg, "signature") => {
                 let signature = get_section_data(&runtime.headers_bytes, ".sha256_sig")
                     .unwrap_or_else(|err| {
                         eprintln!("Failed to get signature info: {err}");
@@ -1992,34 +1994,33 @@ fn main() {
                 println!("{signature}");
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-addsign") => {
+            arg if is_runtime_option(arg, "addsign") => {
                 if let Err(err) = add_section_data(&runtime, ".sha256_sig", &exec_args) {
                     eprintln!("Failed to add signature info: {err}");
                     exit(1)
                 };
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-envs") => {
+            arg if is_runtime_option(arg, "envs") => {
                 println!("{}", runtime.envs);
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-addenvs") => {
+            arg if is_runtime_option(arg, "addenvs") => {
                 if let Err(err) = add_section_data(&runtime, ".envs", &exec_args) {
                     eprintln!("Failed to add envs: {err}");
                     exit(1)
                 };
                 return;
             }
-            ref arg if arg == &format!("--{ARG_PFX}-extract-and-run") => {
-                exec_args.remove(0);
-                is_extract_run = true
-            }
-            ref arg if arg == &format!("--{ARG_PFX}-unshare") => {
-                exec_args.remove(0);
-                is_unshare = true
-            }
             _ => {}
         }
+    }
+    if extract_and_run {
+        exec_args.remove(0);
+        is_extract_run = true;
+    } else if explicit_unshare {
+        exec_args.remove(0);
+        is_unshare = true;
     }
 
     let image = get_image(self_exe, runtime_size).unwrap_or_else(|err|{
@@ -2028,18 +2029,22 @@ fn main() {
         exit(1)
     });
 
+    let arg1 = exec_args.first().map(String::as_str).unwrap_or_default();
     if !arg1.is_empty() {
         match arg1 {
-            arg if arg == format!("--{ARG_PFX}-extract") => {
+            arg if is_runtime_option(arg, "extract") => {
                 extract_image(&embed, &image, PathBuf::from("."), false, exec_args.get(1));
                 return;
             }
-            arg if arg == format!("--{ARG_PFX}-mount") => is_mount_only = true,
+            arg if is_runtime_option(arg, "mount") => is_mount_only = true,
             _ => {}
         }
     }
 
-    let uruntime_extract = match URUNTIME_EXTRACT.replace("URUNTIME_EXTRACT=", "=").as_str() {
+    let uruntime_extract = match URUNTIME_EXTRACT
+        .strip_prefix("URUNTIME_EXTRACT")
+        .unwrap_or_default()
+    {
         "=1" => {
             is_extract_run = true;
             1
@@ -2051,21 +2056,23 @@ fn main() {
 
     let mut reuse_check_delay = get_env_var!("REUSE_CHECK_DELAY");
 
-    let (mut is_remp_mount, default_delay) =
-        match URUNTIME_MOUNT.replace("URUNTIME_MOUNT=", "=").as_str() {
-            "=0" => (
-                true,
-                if is_extract_run {
-                    Some(REUSE_CHECK_DELAY)
-                } else {
-                    Some("inf")
-                },
-            ),
-            "=1" => (false, None),
-            "=2" => (true, Some("30m")),
-            "=3" => (true, Some(REUSE_CHECK_DELAY)),
-            _ => (false, None),
-        };
+    let (mut is_remp_mount, default_delay) = match URUNTIME_MOUNT
+        .strip_prefix("URUNTIME_MOUNT")
+        .unwrap_or_default()
+    {
+        "=0" => (
+            true,
+            if is_extract_run {
+                Some(REUSE_CHECK_DELAY)
+            } else {
+                Some("inf")
+            },
+        ),
+        "=1" => (false, None),
+        "=2" => (true, Some("30m")),
+        "=3" => (true, Some(REUSE_CHECK_DELAY)),
+        _ => (false, None),
+    };
 
     if let Some(default) = default_delay {
         if reuse_check_delay.is_empty() {

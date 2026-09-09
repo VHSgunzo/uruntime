@@ -67,7 +67,7 @@ cargo xtask update-checksums
 git diff -- checksums.txt
 ```
 
-The command downloads all 30 helper sources, validates their boundaries and ELF types, extracts the DwarFS payloads, and records the SHA-256 of both each source file and its final payload. Review the `checksums.txt` diff before committing.
+The command validates all 30 helper sources, reusing only local release files whose SHA-256 matches the current manifest. Missing or mismatched files are downloaded atomically into dependency-specific architecture/version caches that are also consumed by `build.rs`. It validates helper boundaries and ELF types, extracts DwarFS payloads, and records the SHA-256 of both each source file and its final payload. Review the `checksums.txt` diff before committing.
 
 ### Zig
 
@@ -78,9 +78,11 @@ cargo xtask update-checksums
 git diff -- checksums.txt
 ```
 
-`xtask` reads the official `https://ziglang.org/download/index.json` and updates the URLs and SHA-256 values of the archives for supported Linux hosts. The next foreign build downloads the new Zig version into a separate versioned cache under `target/toolchains/`.
+`xtask` reads the official `https://ziglang.org/download/index.json` and updates the URLs and SHA-256 values of the archives for supported Linux hosts. The index, current-host archive, and extracted installation are cached under `target/toolchains/`; archives and installations are keyed by version, host, and full SHA-256. Checksum validation and real builds reuse the same verified archive.
 
 ## 3. Run local checks
+
+Update `RELEASE_NOTES.md` with the public notes for the version being prepared. The release workflow uses this file verbatim when creating or refreshing the GitHub release, so same-tag reruns do not replace the intended notes with an automation placeholder.
 
 Run the full check suite before pushing:
 
@@ -96,7 +98,7 @@ cargo xtask check x86_64-unknown-linux-musl
 
 An explicitly selected foreign target uses the pinned Zig linker backend and requires the matching QEMU user-mode executable (for example, `qemu-aarch64` or `qemu-aarch64-static`) in `PATH` to run the root tests.
 
-The command runs `cargo fmt --check`, root Check/Clippy/tests with `--locked`, separate Check/Clippy/tests for `xtask`, `cargo xtask update-checksums --check`, and `git diff --check` in sequence. It stops at the first failure. The checksum step downloads and hashes all pinned helper sources and validates pinned Zig URL/hash metadata against the official Zig index, so `cargo xtask check` requires network access.
+The command runs `cargo fmt --check`, root Check/Clippy/tests with `--locked`, separate Check/Clippy/tests for `xtask`, `cargo xtask update-checksums --check`, and `git diff --check` in sequence. It stops at the first failure. The checksum step validates all pinned helper sources and Zig metadata. It uses the network only for missing, mismatched, or stale cache entries; a fully populated verified cache works offline.
 
 If cross-linking changed, also build one foreign runtime:
 

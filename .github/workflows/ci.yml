@@ -141,7 +141,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
           EXPECTED_SHA: ${{ github.sha }}
-          RELEASE_BODY: Automated release of the validated uruntime artifacts.
           RELEASE_MARKER: '<!-- uruntime-ci-managed-release -->'
         run: |
           set -euo pipefail
@@ -169,7 +168,7 @@ jobs:
               print(release_id)
           PY
           )
-          release_body=$(printf '%s\n\n%s' "$RELEASE_BODY" "$RELEASE_MARKER")
+          release_body=$(printf '%s\n\n%s' "$(cat RELEASE_NOTES.md)" "$RELEASE_MARKER")
           if [[ -n "$release_id" ]]; then
             [[ $release_id =~ ^[0-9]+$ ]]
             gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
@@ -326,12 +325,11 @@ jobs:
           RELEASE_ID: ${{ steps.acquire_release.outputs.release_id }}
           RELEASE_TAG: ${{ github.ref_name }}
           EXPECTED_SHA: ${{ github.sha }}
-          RELEASE_BODY: Automated release of the validated uruntime artifacts.
           RELEASE_MARKER: '<!-- uruntime-ci-managed-release -->'
         run: |
           set -euo pipefail
           [[ $RELEASE_ID =~ ^[0-9]+$ ]]
-          release_body=$(printf '%s\n\n%s' "$RELEASE_BODY" "$RELEASE_MARKER")
+          release_body=$(printf '%s\n\n%s' "$(cat RELEASE_NOTES.md)" "$RELEASE_MARKER")
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -f "tag_name=$RELEASE_TAG" \
             -f "target_commitish=$EXPECTED_SHA" \

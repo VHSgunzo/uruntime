@@ -1,4 +1,4 @@
-use std::io::{Error, ErrorKind::InvalidData, Read, Result, Seek, SeekFrom};
+use std::io::{Error, ErrorKind::InvalidData, Read, Result};
 
 #[derive(Clone, Copy)]
 enum Endian {
@@ -65,15 +65,27 @@ fn checked_end(offset: u64, size: u64, file_len: u64, label: &str) -> Result<u64
     Ok(end)
 }
 
-fn allocate_zeroed(size: u64, label: &str) -> Result<Vec<u8>> {
-    let size = usize::try_from(size)
+fn append_exact<R: Read>(
+    reader: &mut R,
+    bytes: &mut Vec<u8>,
+    additional: u64,
+    label: &str,
+) -> Result<()> {
+    let additional = usize::try_from(additional)
         .map_err(|_| invalid_data(format!("{label} size does not fit usize")))?;
-    let mut bytes = Vec::new();
     bytes
-        .try_reserve_exact(size)
+        .try_reserve_exact(additional)
         .map_err(|error| invalid_data(format!("cannot allocate {label}: {error}")))?;
-    bytes.resize(size, 0);
-    Ok(bytes)
+    let read = reader
+        .take(additional as u64)
+        .read_to_end(bytes)
+        .map_err(|error| invalid_data(format!("cannot read {label}: {error}")))?;
+    if read != additional {
+        return Err(invalid_data(format!(
+            "cannot read {label}: expected {additional} bytes, read {read}"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) struct ElfPrefix {
@@ -81,7 +93,7 @@ pub(crate) struct ElfPrefix {
     pub(crate) bytes: Vec<u8>,
 }
 
-pub(crate) fn read_elf_prefix<R: Read + Seek>(reader: &mut R, file_len: u64) -> Result<ElfPrefix> {
+pub(crate) fn read_elf_prefix<R: Read>(reader: &mut R, file_len: u64) -> Result<ElfPrefix> {
     if file_len < ELF64_HEADER_SIZE {
         return Err(invalid_data("file is shorter than an ELF64 header"));
     }
@@ -180,14 +192,23 @@ pub(crate) fn read_elf_prefix<R: Read + Seek>(reader: &mut R, file_len: u64) -> 
     if ph_table_end > MAX_ELF_PREFIX_BYTES || sh_table_end > MAX_ELF_PREFIX_BYTES {
         return Err(invalid_data("ELF metadata table lies beyond safety limit"));
     }
-    let mut boundary = ehsize.max(ph_table_end).max(sh_table_end);
+    let metadata_end = ehsize.max(ph_table_end).max(sh_table_end);
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(metadata_end as usize)
+        .map_err(|error| invalid_data(format!("cannot allocate ELF metadata: {error}")))?;
+    bytes.extend_from_slice(&header);
+    append_exact(
+        reader,
+        &mut bytes,
+        metadata_end - ELF64_HEADER_SIZE,
+        "ELF metadata",
+    )?;
+
+    let mut boundary = metadata_end;
 
     if ph_table_size != 0 {
-        let mut table = allocate_zeroed(ph_table_size, "program-header table")?;
-        reader.seek(SeekFrom::Start(phoff))?;
-        reader
-            .read_exact(&mut table)
-            .map_err(|error| invalid_data(format!("cannot read program-header table: {error}")))?;
+        let table = &bytes[phoff as usize..ph_table_end as usize];
         for entry in table.chunks_exact(phentsize as usize) {
             let offset = endian.u64(&entry[8..16])?;
             let size = endian.u64(&entry[32..40])?;
@@ -198,11 +219,7 @@ pub(crate) fn read_elf_prefix<R: Read + Seek>(reader: &mut R, file_len: u64) -> 
     }
 
     if sh_table_size != 0 {
-        let mut table = allocate_zeroed(sh_table_size, "section-header table")?;
-        reader.seek(SeekFrom::Start(shoff))?;
-        reader
-            .read_exact(&mut table)
-            .map_err(|error| invalid_data(format!("cannot read section-header table: {error}")))?;
+        let table = &bytes[shoff as usize..sh_table_end as usize];
         for entry in table.chunks_exact(shentsize as usize) {
             let section_type = endian.u32(&entry[4..8])?;
             let size = endian.u64(&entry[32..40])?;
@@ -219,11 +236,7 @@ pub(crate) fn read_elf_prefix<R: Read + Seek>(reader: &mut R, file_len: u64) -> 
             "ELF file-backed prefix size {boundary} exceeds safety limit {MAX_ELF_PREFIX_BYTES}"
         )));
     }
-    let mut bytes = allocate_zeroed(boundary, "ELF prefix")?;
-    reader.seek(SeekFrom::Start(0))?;
-    reader
-        .read_exact(&mut bytes)
-        .map_err(|error| invalid_data(format!("cannot read ELF prefix: {error}")))?;
+    append_exact(reader, &mut bytes, boundary - metadata_end, "ELF prefix")?;
     Ok(ElfPrefix { boundary, bytes })
 }
 

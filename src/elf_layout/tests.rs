@@ -1,5 +1,27 @@
 use super::read_elf_prefix;
-use std::io::Cursor;
+use std::io::{Cursor, Read, Result};
+
+struct CountingCursor {
+    inner: Cursor<Vec<u8>>,
+    bytes_read: usize,
+}
+
+impl CountingCursor {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            inner: Cursor::new(bytes),
+            bytes_read: 0,
+        }
+    }
+}
+
+impl Read for CountingCursor {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        let count = self.inner.read(buffer)?;
+        self.bytes_read += count;
+        Ok(count)
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum Endian {
@@ -95,6 +117,17 @@ pub(crate) fn fixture(endian: Endian) -> Vec<u8> {
     bytes.extend_from_slice(b"hsqs");
     bytes.extend_from_slice(&[0x5a; 4096]);
     bytes
+}
+
+#[test]
+fn reads_each_prefix_byte_only_once() {
+    let bytes = fixture(Endian::Little);
+    let mut reader = CountingCursor::new(bytes.clone());
+
+    let prefix = read_elf_prefix(&mut reader, bytes.len() as u64).unwrap();
+
+    assert_eq!(prefix.boundary, 0x380);
+    assert_eq!(reader.bytes_read, prefix.boundary as usize);
 }
 
 #[test]

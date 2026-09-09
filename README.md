@@ -233,7 +233,7 @@ Each successful task creates `dist/uruntime-<variant>-<arch>`.
 
 `cargo xtask check` detects the musl target for the current Linux platform. For example, it uses `x86_64-unknown-linux-musl` on `x86_64` and `aarch64-unknown-linux-musl` on `aarch64`. The command runs `cargo fmt --check`, Check, Clippy with `-D warnings`, tests for the root package and `xtask`, validation of all checksums, and `git diff --check`. One of the six Rust targets can be passed explicitly as a second argument. A foreign target uses the same pinned Zig linker backend as a build and requires its matching QEMU user-mode runner to execute the root tests.
 
-Cargo orchestrates every release build, while the project-provided Zig linker wrapper links both native and foreign musl targets consistently. The separate `cross` backend is no longer used. The pinned Zig 0.16.0 is downloaded automatically to `target/toolchains/`, verified against its SHA-256, and reused. Automatic downloads are supported on Linux hosts with `x86_64`, `aarch64`, `riscv64`, `loongarch64`, or `powerpc64le`. On another host, set `URUNTIME_ZIG`; running `zig version` for the selected file must return exactly `0.16.0`.
+Cargo orchestrates every release build, while the project-provided Zig linker wrapper links both native and foreign musl targets consistently. The separate `cross` backend is no longer used. The pinned Zig 0.16.0 index, current-host archive, and extracted installation are cached under `target/toolchains/`. Archives and installations are keyed by version, host, and full SHA-256; every reuse is verified before use. Automatic downloads are supported on Linux hosts with `x86_64`, `aarch64`, `riscv64`, `loongarch64`, or `powerpc64le`. On another host, set `URUNTIME_ZIG`; running `zig version` for the selected file must return exactly `0.16.0`.
 
 QEMU is not involved in the build and is not needed to extract DwarFS helpers. It is used only to run `--version` on finished foreign-architecture files during smoke tests.
 
@@ -253,7 +253,7 @@ cargo xtask update-checksums
 git diff -- checksums.txt
 ```
 
-Both commands access the network and check all 30 helper sources, not just the current architecture. Always review the diff after an update. `URUNTIME_CURL=/path/to/curl` selects the download program for both `build.rs` and `update-checksums`.
+Both commands check all 30 helper sources, not just the current architecture alone. A source is reused only when its bounded SHA-256 matches the current manifest; a missing or mismatched source is downloaded atomically into the same dependency-specific cache later consumed by `build.rs`. SquashFUSE, squashfs-tools, and DwarFS sources have separate architecture/version cache trees, so updating one dependency does not invalidate the others. The Zig index and current-host archive use the same verified-cache policy. A fully populated cache allows checksum validation without network access. Always review the diff after an update. `URUNTIME_CURL=/path/to/curl` selects the download program for both `build.rs` and `update-checksums`.
 
 ## CI builds
 

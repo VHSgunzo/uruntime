@@ -1,7 +1,7 @@
 use super::{
     embedded_unshare_policy, environment_drop_caps_policy, fallback_should_drop_capabilities,
-    get_image, get_runtime, get_section_data, parse_unshare_cli_options, remove_runtime_separator,
-    should_drop_capabilities, UnshareCliOptions,
+    get_image, get_runtime, get_section_data, is_runtime_option, parse_unshare_cli_options,
+    remove_runtime_separator, should_drop_capabilities, UnshareCliOptions, ARG_PFX,
 };
 use crate::elf_layout::tests::{fixture, Endian};
 use std::io::Write;
@@ -34,6 +34,18 @@ fn embedded_unshare_modes_distinguish_explicit_and_fallback_capability_drop() {
     assert!(readme.contains("capabilities only when `unshare` is entered automatically"));
     assert!(readme.contains("<ENV>_UNSHARE=3"));
     assert!(readme.contains("--<prefix>-unshare-fallback-drop-caps"));
+}
+
+#[test]
+fn runtime_option_matching_is_exact_and_allocation_free() {
+    let valid = format!("--{ARG_PFX}-version");
+    let unshare = format!("--{ARG_PFX}-unshare");
+    let extra = format!("--{ARG_PFX}-version-extra");
+    assert!(is_runtime_option(&valid, "version"));
+    assert!(is_runtime_option(&unshare, "unshare"));
+    assert!(!is_runtime_option("--other-version", "version"));
+    assert!(!is_runtime_option(&extra, "version"));
+    assert!(!is_runtime_option("runtime-version", "version"));
 }
 
 #[test]
@@ -114,8 +126,18 @@ fn fallback_only_unshare_cli_mode_combines_with_explicit_unshare_by_prioritizing
         vec!["--appimage-unshare-uid".into()],
         vec!["--appimage-unshare-gid=not-a-number".into()],
     ] {
+        let original = args.clone();
         assert!(parse_unshare_cli_options(&mut args, "appimage").is_err());
+        assert_eq!(args, original);
     }
+
+    let mut ordinary_args = vec!["--application-option".into(), "value".into()];
+    let original = ordinary_args.clone();
+    assert_eq!(
+        parse_unshare_cli_options(&mut ordinary_args, "appimage").unwrap(),
+        UnshareCliOptions::default()
+    );
+    assert_eq!(ordinary_args, original);
 }
 
 #[test]

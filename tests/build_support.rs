@@ -4,8 +4,9 @@ pub mod build_support;
 use build_support::{
     all_asset_sources, asset_urls, atomic_write, cache_relative_path, cache_version, curl_args,
     digest_records, download_atomic, extract_dwarfs_wrapper, parse_digest_manifest,
-    prepare_assets_with, sha256_file, sha256_hex, stage_output, target_spec, validate_elf, Asset,
-    AssetKind, BuildFeatures, ElfEndian, ElfType, MAX_DOWNLOAD_SIZE, MAX_HELPER_SIZE,
+    prepare_assets_with, sha256_file, sha256_hex, source_cache_name, source_cache_relative_path,
+    stage_output, target_spec, validate_elf, Asset, AssetKind, BuildFeatures, ElfEndian, ElfType,
+    MAX_DOWNLOAD_SIZE, MAX_HELPER_SIZE,
 };
 use xxhash_rust::xxh64::xxh64;
 
@@ -572,7 +573,7 @@ fn corrupted_source_cache_is_deleted_and_reacquired() {
     let payload = synthetic_elf(spec.elf_machine, spec.endian);
     let digest = sha256_hex(&payload);
     let asset = Asset {
-        name: "helper",
+        name: "squashfuse",
         url: "https://example.invalid/helper".to_string(),
         kind: AssetKind::Direct,
         source_sha256: digest.clone(),
@@ -596,15 +597,83 @@ fn corrupted_source_cache_is_deleted_and_reacquired() {
         &downloader,
     )
     .unwrap();
-    std::fs::write(cache.join(".source-helper"), b"corrupt").unwrap();
+    std::fs::write(cache.join(".source-squashfuse"), b"corrupt").unwrap();
     prepare_assets_with(&cache, &out, spec, &[asset], &downloader).unwrap();
 
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
-        sha256_file(&cache.join(".source-helper"), MAX_DOWNLOAD_SIZE).unwrap(),
+        sha256_file(&cache.join(".source-squashfuse"), MAX_DOWNLOAD_SIZE).unwrap(),
         asset_source_hash(&payload)
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shared_source_cache_is_reused_by_new_feature_generations() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let spec = target_spec("x86_64-unknown-linux-musl").unwrap();
+    let payload = synthetic_elf(spec.elf_machine, spec.endian);
+    let digest = sha256_hex(&payload);
+    let asset = Asset {
+        name: "squashfuse",
+        url: "https://example.invalid/helper".to_string(),
+        kind: AssetKind::Direct,
+        source_sha256: digest.clone(),
+        payload_sha256: digest,
+        elf_type: ElfType::StaticExec,
+    };
+    let root = test_dir("shared-source-cache");
+    let cache = root.join("version").join("feature-generation");
+    let out = root.join("out");
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    let shared_source = cache
+        .parent()
+        .unwrap()
+        .join("squashfuse-0.6.3.r2")
+        .join(source_cache_name(asset.name, asset.kind));
+    std::fs::create_dir_all(shared_source.parent().unwrap()).unwrap();
+    std::fs::write(shared_source, &payload).unwrap();
+    let calls = AtomicUsize::new(0);
+    let downloader = |_: &Asset, _: &std::path::Path| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Err("shared source should avoid a download".to_string())
+    };
+
+    prepare_assets_with(&cache, &out, spec, &[asset], &downloader).unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(out.join("squashfuse-zst").is_file());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn helper_source_caches_are_versioned_per_upstream_project() {
+    let target = target_spec("x86_64-unknown-linux-musl").unwrap();
+    assert_eq!(
+        source_cache_relative_path(target, "squashfuse", AssetKind::Direct).unwrap(),
+        std::path::PathBuf::from("assets-x86_64/squashfuse-0.6.3.r2/squashfuse")
+    );
+    assert_eq!(
+        source_cache_relative_path(target, "mksquashfs", AssetKind::Direct).unwrap(),
+        std::path::PathBuf::from("assets-x86_64/squashfs-tools-4.7.5.r2/mksquashfs")
+    );
+    assert_eq!(
+        source_cache_relative_path(target, "dwarfs-universal", AssetKind::DwarfsWrapper).unwrap(),
+        std::path::PathBuf::from("assets-x86_64/dwarfs-0.15.7/dwarfs-universal-wrapper")
+    );
+}
+
+#[test]
+fn wrapper_sources_have_distinct_shared_cache_names() {
+    assert_eq!(
+        source_cache_name("dwarfs-universal", AssetKind::DwarfsWrapper),
+        "dwarfs-universal-wrapper"
+    );
+    assert_eq!(
+        source_cache_name("squashfuse", AssetKind::Direct),
+        "squashfuse"
+    );
 }
 
 #[test]
@@ -615,7 +684,7 @@ fn partial_generation_recovers_and_level_22_zst_is_byte_equal_to_raw_elf() {
     let payload = synthetic_elf(spec.elf_machine, spec.endian);
     let digest = sha256_hex(&payload);
     let asset = Asset {
-        name: "helper",
+        name: "squashfuse",
         url: "https://example.invalid/helper".to_string(),
         kind: AssetKind::Direct,
         source_sha256: digest.clone(),
@@ -639,13 +708,14 @@ fn partial_generation_recovers_and_level_22_zst_is_byte_equal_to_raw_elf() {
         &downloader,
     )
     .unwrap();
-    std::fs::remove_file(cache.join("helper-zst")).unwrap();
+    std::fs::remove_file(cache.join("squashfuse-zst")).unwrap();
     prepare_assets_with(&cache, &out, spec, &[asset], &downloader).unwrap();
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let raw = std::fs::read(cache.join("helper")).unwrap();
+    let raw = std::fs::read(cache.join("squashfuse")).unwrap();
     let decoded =
-        zstd::stream::decode_all(std::fs::File::open(cache.join("helper-zst")).unwrap()).unwrap();
+        zstd::stream::decode_all(std::fs::File::open(cache.join("squashfuse-zst")).unwrap())
+            .unwrap();
     assert_eq!(decoded, raw);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -661,7 +731,7 @@ fn concurrent_generation_uses_one_locked_transaction() {
     let payload = Arc::new(synthetic_elf(spec.elf_machine, spec.endian));
     let digest = sha256_hex(&payload);
     let asset = Asset {
-        name: "helper",
+        name: "squashfuse",
         url: "https://example.invalid/helper".to_string(),
         kind: AssetKind::Direct,
         source_sha256: digest.clone(),

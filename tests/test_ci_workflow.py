@@ -125,6 +125,7 @@ class WorkflowContractTests(unittest.TestCase):
         for field in ("draft=true", "prerelease=false", "generate_release_notes=false", "make_latest=false"):
             self.assertIn(field, acquire)
         self.assertIn("RELEASE_MARKER", acquire)
+        self.assertIn("cat RELEASE_NOTES.md", acquire)
         self.assertIn(".id == $id", acquire)
         self.assertIn(".tag_name == $tag", acquire)
         deletion = runs[delete_index]
@@ -147,6 +148,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("generate_release_notes=false", runs[publish_index])
         self.assertIn("make_latest=legacy", runs[publish_index])
         self.assertIn("RELEASE_MARKER", runs[publish_index])
+        self.assertIn("cat RELEASE_NOTES.md", runs[publish_index])
         self.assertIn("published-release-readback.json", runs[publish_index])
         self.assertRegex(combined, r"\[\[ \$RELEASE_ID =~ \^\[0-9\]\+\$ \]\]")
 

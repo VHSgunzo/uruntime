@@ -12,8 +12,8 @@ use fs2::FileExt;
 #[path = "../../build_support.rs"]
 pub mod build_support;
 use build_support::{
-    CHECKSUM_MANIFEST, ZIG_DOWNLOAD_BASE, ZIG_DOWNLOAD_MAX, ZIG_INDEX_URL, ZIG_PLATFORMS,
-    ZIG_VERSION,
+    source_cache_relative_path, with_cache_lock, CHECKSUM_MANIFEST, MAX_DOWNLOAD_SIZE,
+    ZIG_DOWNLOAD_BASE, ZIG_DOWNLOAD_MAX, ZIG_INDEX_URL, ZIG_PLATFORMS, ZIG_VERSION,
 };
 
 const BIN_NAME: &str = "uruntime";
@@ -595,6 +595,94 @@ fn require_zig_version(path: &Path) -> Result<(), DynError> {
     Ok(())
 }
 
+fn zig_archive_path(toolchains: &Path, package: &ZigPackage) -> PathBuf {
+    toolchains.join(format!(
+        "zig-{}-{}-{}.tar.xz",
+        package.version, package.platform, package.sha256
+    ))
+}
+
+fn legacy_zig_archive_path(toolchains: &Path, package: &ZigPackage) -> PathBuf {
+    toolchains.join(format!(
+        "zig-{}-{}.tar.xz",
+        package.version, package.platform
+    ))
+}
+
+fn download_zig_archive(
+    curl: &OsStr,
+    package: &ZigPackage,
+    archive_path: &Path,
+) -> Result<(), DynError> {
+    let toolchains = archive_path
+        .parent()
+        .ok_or("Zig archive path has no parent")?;
+    create_dir_all(toolchains)?;
+    let archive = tempfile::NamedTempFile::new_in(toolchains)?;
+    let archive_output = archive.reopen()?;
+    let status = Command::new(curl)
+        .args(["--fail", "--location", "--retry", "3", "--max-filesize"])
+        .arg(ZIG_DOWNLOAD_MAX.to_string())
+        .arg(&package.url)
+        .stdout(Stdio::from(archive_output))
+        .status()?;
+    if !status.success() {
+        return Err(format!(
+            "failed to download pinned Zig {} from {}",
+            package.version, package.url
+        )
+        .into());
+    }
+    archive.as_file().sync_all()?;
+    let actual = build_support::sha256_file(archive.path(), ZIG_DOWNLOAD_MAX)
+        .map_err(|error| -> DynError { error.into() })?;
+    if actual != package.sha256 {
+        return Err(format!(
+            "SHA-256 mismatch for Zig {}: expected {}, got {actual}",
+            package.version, package.sha256
+        )
+        .into());
+    }
+    archive.persist(archive_path)?;
+    File::open(toolchains)?.sync_all()?;
+    Ok(())
+}
+
+fn ensure_zig_archive(
+    curl: &OsStr,
+    toolchains: &Path,
+    package: &ZigPackage,
+) -> Result<PathBuf, DynError> {
+    let archive_path = zig_archive_path(toolchains, package);
+    with_cache_lock(&archive_path, || {
+        let actual = build_support::sha256_file(&archive_path, ZIG_DOWNLOAD_MAX);
+        if actual.as_deref() == Ok(package.sha256.as_str()) {
+            eprintln!("using verified cached {}", archive_path.display());
+            return Ok(archive_path.clone());
+        }
+        let legacy_path = legacy_zig_archive_path(toolchains, package);
+        let legacy_actual = build_support::sha256_file(&legacy_path, ZIG_DOWNLOAD_MAX);
+        if legacy_actual.as_deref() == Ok(package.sha256.as_str()) {
+            fs::rename(&legacy_path, &archive_path).map_err(|error| {
+                format!(
+                    "failed to migrate {} to {}: {error}",
+                    legacy_path.display(),
+                    archive_path.display()
+                )
+            })?;
+            eprintln!("using verified cached {}", archive_path.display());
+            return Ok(archive_path.clone());
+        }
+        eprintln!(
+            "downloading pinned Zig {} from {}",
+            package.version, package.url
+        );
+        download_zig_archive(curl, package, &archive_path).map_err(|error| error.to_string())?;
+        Ok(archive_path.clone())
+    })
+    .map_err(|error| error.into())
+}
+
 fn ensure_zig() -> Result<PathBuf, DynError> {
     if let Some(override_path) = env::var_os("URUNTIME_ZIG") {
         let path = resolve_program(&PathBuf::from(override_path), &env::current_dir()?)?;
@@ -605,13 +693,19 @@ fn ensure_zig() -> Result<PathBuf, DynError> {
     let package = zig_package(env::consts::OS, env::consts::ARCH)?;
     let toolchains = project_root().join("target/toolchains");
     create_dir_all(&toolchains)?;
-    let install = toolchains.join(format!("zig-{ZIG_VERSION}-{}", package.platform));
+    let install = toolchains.join(format!(
+        "zig-{ZIG_VERSION}-{}-{}",
+        package.platform, package.sha256
+    ));
     let zig = install.join("zig");
     if zig.is_file() && require_zig_version(&zig).is_ok() {
         return Ok(zig);
     }
 
-    let lock_path = toolchains.join(format!(".zig-{ZIG_VERSION}-{}.lock", package.platform));
+    let lock_path = toolchains.join(format!(
+        ".zig-{ZIG_VERSION}-{}-{}.lock",
+        package.platform, package.sha256
+    ));
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -623,36 +717,14 @@ fn ensure_zig() -> Result<PathBuf, DynError> {
         return Ok(zig);
     }
 
-    let url = &package.url;
-    eprintln!("installing pinned Zig {ZIG_VERSION} from {url}");
-    let archive = tempfile::NamedTempFile::new_in(&toolchains)?;
-    let archive_output = archive.reopen()?;
-    let status = Command::new("curl")
-        .args(["--fail", "--location", "--retry", "3", "--max-filesize"])
-        .arg(ZIG_DOWNLOAD_MAX.to_string())
-        .arg(url)
-        .stdout(Stdio::from(archive_output))
-        .status()?;
-    if !status.success() {
-        return Err(format!("failed to download pinned Zig {ZIG_VERSION} from {url}").into());
-    }
-    archive.as_file().sync_all()?;
-    let actual = build_support::sha256_file(archive.path(), ZIG_DOWNLOAD_MAX)
-        .map_err(|error| -> DynError { error.into() })?;
-    if actual != package.sha256 {
-        return Err(format!(
-            "SHA-256 mismatch for Zig {ZIG_VERSION}: expected {}, got {actual}",
-            package.sha256
-        )
-        .into());
-    }
+    let archive_path = ensure_zig_archive(OsStr::new("curl"), &toolchains, &package)?;
 
     let stage = tempfile::Builder::new()
         .prefix(".zig-install-")
         .tempdir_in(&toolchains)?;
     let status = Command::new("tar")
         .args(["-xJf"])
-        .arg(archive.path())
+        .arg(&archive_path)
         .arg("-C")
         .arg(stage.path())
         .arg("--strip-components=1")
@@ -736,6 +808,34 @@ where
     Ok(section)
 }
 
+fn render_zig_manifest_section(packages: &[ZigPackage]) -> String {
+    let mut section = String::from("[zig]\n# version\tplatform\turl\tsha256\n");
+    for package in packages {
+        section.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            package.version, package.platform, package.url, package.sha256
+        ));
+    }
+    section
+}
+
+fn cached_zig_index_matches_manifest(index: &[u8]) -> bool {
+    let Ok(packages) = zig_packages() else {
+        return false;
+    };
+    render_zig_section(index).is_ok_and(|section| section == render_zig_manifest_section(&packages))
+}
+
+fn zig_package_from_index(index: &[u8], os: &str, arch: &str) -> Result<ZigPackage, DynError> {
+    let platform = zig_platform(os, arch)
+        .ok_or_else(|| format!("unsupported Zig host platform {arch}-{os}"))?;
+    let section = render_zig_section(index)?;
+    parse_zig_packages(&section)?
+        .into_iter()
+        .find(|package| package.platform == platform)
+        .ok_or_else(|| format!("Zig {ZIG_VERSION} index has no {platform} package").into())
+}
+
 fn render_zig_section(index: &[u8]) -> Result<String, DynError> {
     let root: serde_json::Value = serde_json::from_slice(index)?;
     let release = root
@@ -817,26 +917,115 @@ where
     Ok(ManifestUpdate::Updated)
 }
 
-fn update_checksums(check: bool) -> Result<(), DynError> {
-    let temporary = tempfile::tempdir()?;
-    let curl = env::var_os("URUNTIME_CURL").unwrap_or_else(|| "curl".into());
-    let fetch = |source: &build_support::AssetSource| -> Result<Vec<u8>, String> {
-        let destination = temporary
-            .path()
-            .join(format!("{}-{}", source.target.release_arch, source.name));
-        build_support::download_atomic(&curl, &source.url, &destination)?;
-        fs::read(&destination)
-            .map_err(|error| format!("failed to read {}: {error}", destination.display()))
+fn helper_source_cache_path(
+    project: &Path,
+    source: &build_support::AssetSource,
+) -> Result<PathBuf, String> {
+    Ok(project.join(source_cache_relative_path(
+        source.target,
+        source.name,
+        source.kind,
+    )?))
+}
+
+fn read_cached_helper_source(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("failed to inspect {}: {error}", path.display())),
     };
+    if !metadata.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if metadata.len() > MAX_DOWNLOAD_SIZE as u64 {
+        return Err(format!(
+            "{} size {} exceeds limit {MAX_DOWNLOAD_SIZE}",
+            path.display(),
+            metadata.len()
+        ));
+    }
+    fs::read(path)
+        .map(Some)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))
+}
+
+fn read_verified_cached_helper_source(
+    path: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(bytes) = read_cached_helper_source(path)? else {
+        return Ok(None);
+    };
+    let actual = build_support::sha256_hex(&bytes);
+    Ok((expected_sha256 == Some(actual.as_str())).then_some(bytes))
+}
+
+fn update_checksums(check: bool) -> Result<(), DynError> {
+    let curl = env::var_os("URUNTIME_CURL").unwrap_or_else(|| "curl".into());
+    let project = project_root();
+    let current_digests = build_support::digest_records()
+        .map_err(|error| format!("failed to read current helper checksums: {error}"))?;
+    let fetch = |source: &build_support::AssetSource| -> Result<Vec<u8>, String> {
+        let destination = helper_source_cache_path(&project, source)?;
+        let expected = current_digests
+            .iter()
+            .find(|record| {
+                record.arch == source.target.release_arch && record.name == source.name
+            })
+            .map(|record| record.source_sha256.as_str());
+        with_cache_lock(&destination, || {
+            if let Some(bytes) = read_verified_cached_helper_source(&destination, expected)? {
+                eprintln!("using verified cached {}", destination.display());
+                return Ok(bytes);
+            }
+            if destination.exists() {
+                eprintln!(
+                    "cached {} does not match the current manifest; downloading it again",
+                    destination.display()
+                );
+            } else {
+                eprintln!("cache miss for {}; downloading it", destination.display());
+            }
+            build_support::download_atomic(&curl, &source.url, &destination)?;
+            read_cached_helper_source(&destination)?.ok_or_else(|| {
+                format!(
+                    "downloaded helper disappeared from {}",
+                    destination.display()
+                )
+            })
+        })
+    };
+    let toolchains = project.join("target/toolchains");
+    let zig_index_path = toolchains.join("zig-index.json");
+    let zig_index = with_cache_lock(&zig_index_path, || {
+        if let Some(index) = read_cached_helper_source(&zig_index_path)? {
+            if cached_zig_index_matches_manifest(&index) {
+                eprintln!("using verified cached {}", zig_index_path.display());
+                return Ok(index);
+            }
+            eprintln!(
+                "cached {} does not match the current Zig manifest; downloading it again",
+                zig_index_path.display()
+            );
+        } else {
+            eprintln!("cache miss for {}; downloading it", zig_index_path.display());
+        }
+        build_support::download_atomic(&curl, ZIG_INDEX_URL, &zig_index_path)?;
+        read_cached_helper_source(&zig_index_path)?.ok_or_else(|| {
+            format!(
+                "downloaded Zig index disappeared from {}",
+                zig_index_path.display()
+            )
+        })
+    })
+    .map_err(|error| -> DynError { error.into() })?;
     eprintln!(
-        "validating Zig {ZIG_VERSION} metadata for {} supported Linux hosts from {ZIG_INDEX_URL}",
+        "validating Zig {ZIG_VERSION} metadata for {} supported Linux hosts",
         ZIG_PLATFORMS.len()
     );
-    let zig_index_path = temporary.path().join("zig-index.json");
-    build_support::download_atomic(&curl, ZIG_INDEX_URL, &zig_index_path)
-        .map_err(|error| -> DynError { error.into() })?;
-    let zig_index = fs::read(&zig_index_path)?;
-    let manifest_path = project_root().join("checksums.txt");
+    let host_zig = zig_package_from_index(&zig_index, env::consts::OS, env::consts::ARCH)?;
+    ensure_zig_archive(curl.as_os_str(), &toolchains, &host_zig)?;
+    let manifest_path = project.join("checksums.txt");
     match update_checksum_manifest_with(
         &manifest_path,
         check,

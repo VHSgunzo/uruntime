@@ -462,6 +462,95 @@ fn checksum_update_uses_validated_payloads_sorted_atomic_check_and_no_change() {
 }
 
 #[test]
+fn helper_checksum_cache_uses_the_build_source_directory() {
+    let project = PathBuf::from("/project");
+    let target = build_support::target_spec("x86_64-unknown-linux-musl").unwrap();
+    let direct = build_support::AssetSource {
+        target,
+        name: "squashfuse",
+        url: "fixture://direct".into(),
+        kind: build_support::AssetKind::Direct,
+        elf_type: build_support::ElfType::StaticPie,
+    };
+    let wrapper = build_support::AssetSource {
+        target,
+        name: "dwarfs-universal",
+        url: "fixture://wrapper".into(),
+        kind: build_support::AssetKind::DwarfsWrapper,
+        elf_type: build_support::ElfType::StaticExec,
+    };
+
+    assert_eq!(
+        helper_source_cache_path(&project, &direct).unwrap(),
+        project
+            .join("assets-x86_64")
+            .join("squashfuse-0.6.3.r2")
+            .join("squashfuse")
+    );
+    assert_eq!(
+        helper_source_cache_path(&project, &wrapper).unwrap(),
+        project
+            .join("assets-x86_64")
+            .join("dwarfs-0.15.7")
+            .join("dwarfs-universal-wrapper")
+    );
+}
+
+#[test]
+fn checksum_cache_is_reused_only_when_its_digest_matches() {
+    let root = test_dir("verified-helper-cache");
+    fs::create_dir_all(&root).unwrap();
+    let cached = root.join("helper");
+    fs::write(&cached, b"release bytes").unwrap();
+    let expected = build_support::sha256_hex(b"release bytes");
+
+    assert_eq!(
+        read_verified_cached_helper_source(&cached, Some(&expected)).unwrap(),
+        Some(b"release bytes".to_vec())
+    );
+    assert_eq!(
+        read_verified_cached_helper_source(&cached, Some(&"0".repeat(64))).unwrap(),
+        None
+    );
+    assert_eq!(
+        read_verified_cached_helper_source(&cached, None).unwrap(),
+        None
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn synthetic_zig_index_matches_pinned_manifest_and_resolves_host_archive() {
+    let mut release = serde_json::Map::new();
+    for package in zig_packages().unwrap() {
+        release.insert(
+            package.platform,
+            serde_json::json!({
+                "tarball": package.url,
+                "shasum": package.sha256,
+            }),
+        );
+    }
+    let index = serde_json::to_vec(&serde_json::json!({ ZIG_VERSION: release })).unwrap();
+    assert!(cached_zig_index_matches_manifest(&index));
+    let package = zig_package_from_index(&index, "linux", "x86_64").unwrap();
+    assert_eq!(package.platform, "x86_64-linux");
+    assert_eq!(
+        zig_archive_path(Path::new("/cache"), &package),
+        PathBuf::from(format!(
+            "/cache/zig-{ZIG_VERSION}-x86_64-linux-{}.tar.xz",
+            package.sha256
+        ))
+    );
+
+    let mut changed: serde_json::Value = serde_json::from_slice(&index).unwrap();
+    changed[ZIG_VERSION]["x86_64-linux"]["shasum"] = serde_json::Value::String("b".repeat(64));
+    assert!(!cached_zig_index_matches_manifest(
+        &serde_json::to_vec(&changed).unwrap()
+    ));
+}
+
+#[test]
 fn checksum_update_propagates_manifest_read_errors() {
     let root = test_dir("checksum-read-error");
     fs::create_dir_all(&root).unwrap();

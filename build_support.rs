@@ -832,10 +832,58 @@ impl Drop for CacheLock {
     }
 }
 
+#[allow(dead_code)]
+pub fn with_cache_lock<T, F>(path: &Path, operation: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    let _lock = CacheLock::acquire(path)?;
+    operation()
+}
+
 fn source_name(asset: &Asset) -> OsString {
     let mut name = OsString::from(".source-");
     name.push(asset.name);
     name
+}
+
+pub fn source_cache_name(name: &str, kind: AssetKind) -> String {
+    match kind {
+        AssetKind::Direct => name.to_string(),
+        AssetKind::DwarfsWrapper => format!("{name}-wrapper"),
+    }
+}
+
+fn source_cache_component(name: &str) -> Result<String, String> {
+    match name {
+        "squashfuse" => Ok(format!("squashfuse-{SQUASHFUSE_VERSION}")),
+        "unsquashfs" | "mksquashfs" => Ok(format!("squashfs-tools-{SQUASHFS_TOOLS_VERSION}")),
+        "dwarfs-universal" | "dwarfs-fuse-extract" => Ok(format!("dwarfs-{DWARFS_VERSION}")),
+        _ => Err(format!("unknown helper source `{name}`")),
+    }
+}
+
+#[allow(dead_code)]
+pub fn source_cache_relative_path(
+    target: TargetSpec,
+    name: &str,
+    kind: AssetKind,
+) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(format!("assets-{}", target.release_arch))
+        .join(source_cache_component(name)?)
+        .join(source_cache_name(name, kind)))
+}
+
+fn source_cache_path(cache: &Path, target: TargetSpec, asset: &Asset) -> Result<PathBuf, String> {
+    let architecture_dir = format!("assets-{}", target.release_arch);
+    let root = cache
+        .ancestors()
+        .find(|path| path.file_name() == Some(OsStr::new(&architecture_dir)))
+        .or_else(|| cache.parent())
+        .ok_or_else(|| format!("cache has no parent directory: {}", cache.display()))?;
+    Ok(root
+        .join(source_cache_component(asset.name)?)
+        .join(source_cache_name(asset.name, asset.kind)))
 }
 
 fn generation_valid(cache: &Path, target: TargetSpec, assets: &[Asset]) -> Result<(), String> {
@@ -1004,13 +1052,21 @@ where
             if verify_digest(&cached_source, &asset.source_sha256, MAX_DOWNLOAD_SIZE).is_ok() {
                 copy_bounded(&cached_source, &stage_source, MAX_DOWNLOAD_SIZE)?;
             } else {
-                downloader(asset, &stage_source)?;
-                verify_digest(&stage_source, &asset.source_sha256, MAX_DOWNLOAD_SIZE).map_err(
-                    |err| {
-                        let _ = fs::remove_file(&stage_source);
-                        format!("downloaded asset failed integrity validation: {err}")
-                    },
-                )?;
+                let source_cache = source_cache_path(cache, target, asset)?;
+                {
+                    let _source_lock = CacheLock::acquire(&source_cache)?;
+                    if verify_digest(&source_cache, &asset.source_sha256, MAX_DOWNLOAD_SIZE)
+                        .is_err()
+                    {
+                        downloader(asset, &source_cache)?;
+                        verify_digest(&source_cache, &asset.source_sha256, MAX_DOWNLOAD_SIZE)
+                            .map_err(|err| {
+                                let _ = fs::remove_file(&source_cache);
+                                format!("downloaded asset failed integrity validation: {err}")
+                            })?;
+                    }
+                    copy_bounded(&source_cache, &stage_source, MAX_DOWNLOAD_SIZE)?;
+                }
             }
 
             let source = read_bounded(&stage_source, MAX_DOWNLOAD_SIZE)?;
