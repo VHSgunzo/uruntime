@@ -1,297 +1,429 @@
-# URUNTIME
-Universal [RunImage](https://github.com/VHSgunzo/runimage) and [AppImage](https://appimage.org/) runtime with [SquashFS](https://docs.kernel.org/filesystems/squashfs.html) and [DwarFS](https://github.com/mhx/dwarfs) supports
+# uruntime 0.7.0
 
-## To get started:
-* **Download the latest revision**
-```
-git clone https://github.com/VHSgunzo/uruntime.git && cd uruntime
-```
+`uruntime` is a static runtime for [RunImage](https://github.com/VHSgunzo/runimage) and [AppImage](https://appimage.org/). It detects an appended [SquashFS](https://docs.kernel.org/filesystems/squashfs.html) or [DwarFS](https://github.com/mhx/dwarfs) image, mounts it through FUSE, or extracts it and runs the application without FUSE.
 
-* **Compile a binary**
-```
-rustup toolchain add nightly
-rustup target add x86_64-unknown-linux-musl
-rustup component add rust-src --toolchain nightly
+The project is intended for both users of prebuilt images and AppImage/RunImage authors. A single ELF contains the launcher, static filesystem tools, and mutable areas for configuration, environment variables, a signature, and update information.
 
-cargo xtask
-# Tasks:
-#     x86_64                           build x86_64 RunImage and AppImage uruntime
-#     runimage-x86_64                  build x86_64 RunImage uruntime
-#     appimage-x86_64                  build x86_64 AppImage uruntime
-#     appimage-lite-x86_64             build x86_64 AppImage uruntime (no dwarfsck, mkdwarfs, mksquashfs, sqfstar)
-#     appimage-squashfs-x86_64         build x86_64 AppImage uruntime (SquashFS-only)
-#     appimage-squashfs-lite-x86_64    build x86_64 AppImage uruntime (SquashFS-only no mksquashfs, sqfstar)
-#     appimage-dwarfs-x86_64           build x86_64 AppImage uruntime (DwarFS-only)
-#     appimage-dwarfs-lite-x86_64      build x86_64 AppImage uruntime (DwarFS-only no dwarfsck, mkdwarfs)
-# 
-#     aarch64                          build aarch64 RunImage and AppImage uruntime
-#     runimage-aarch64                 build aarch64 RunImage uruntime
-#     appimage-aarch64                 build aarch64 AppImage uruntime
-#     appimage-lite-aarch64            build aarch64 AppImage uruntime (no dwarfsck, mkdwarfs, mksquashfs, sqfstar)
-#     appimage-squashfs-aarch64        build aarch64 AppImage uruntime (SquashFS-only)
-#     appimage-squashfs-lite-aarch64   build aarch64 AppImage uruntime (SquashFS-only no mksquashfs, sqfstar)
-#     appimage-dwarfs-aarch64          build aarch64 AppImage uruntime (DwarFS-only)
-#     appimage-dwarfs-lite-aarch64     build aarch64 AppImage uruntime (DwarFS-only no dwarfsck, mkdwarfs)
-# 
-#     all                              build all of the above
+## How it works
 
-# for RunImage x86_64
-cargo xtask runimage-x86_64
+When started, `uruntime`:
 
-# for AppImage x86_64
-cargo xtask appimage-x86_64
-```
-See [Build step in ci.yml](https://github.com/VHSgunzo/uruntime/blob/main/.github/workflows/ci.yml#L34)
+1. reads the runtime format, embedded settings, and boundary of the appended image;
+2. identifies the filesystem by its signature and selects the embedded SquashFS or DwarFS helper;
+3. prepares the `.env` file, portable directories, and internal environment variables;
+4. creates user and mount namespaces with the requested UID/GID mapping when needed;
+5. mounts the image through FUSE or falls back to extraction if the configuration permits it;
+6. runs `AppRun` for an AppImage or runs `Run.sh` through the embedded `static/bash` for a RunImage;
+7. after the application exits, removes the extracted directory or unmounts the image according to the reuse mode.
 
-* Or take an already precompiled from the [releases](https://github.com/VHSgunzo/uruntime/releases)
+Filesystem helpers are stored inside the runtime in Zstd-compressed form and executed through `memfd`. If `memfd-exec` is disabled, the runtime uses a temporary executable file. You can change the launch configuration, embedded environment, and update information in a finished runtime without recompiling it or rebuilding the appended image.
 
-### **Built-in configuration:**
-You can change the startup logic by changing the built-in uruntime parameters.
-* `URUNTIME_EXTRACT` - Specifies the logic of extracting or mounting
-```
-# URUNTIME_EXTRACT=0 - FUSE mounting only
-sed -i 's|URUNTIME_EXTRACT=[0-9]|URUNTIME_EXTRACT=0|' /path/uruntime
+## Features
 
-# URUNTIME_EXTRACT=1 - Do not use FUSE mounting, but extract and run
-sed -i 's|URUNTIME_EXTRACT=[0-9]|URUNTIME_EXTRACT=1|' /path/uruntime
+### Mounting and extraction
 
-# URUNTIME_EXTRACT=2 - Try to use FUSE mounting and if it is unavailable extract and run
-sed -i 's|URUNTIME_EXTRACT=[0-9]|URUNTIME_EXTRACT=2|' /path/uruntime
+- SquashFS and DwarFS in one runtime, or separate filesystem-specific variants.
+- FUSE operation, forced extraction, and configurable fallback to extraction when FUSE is unavailable.
+- A fallback limit based on the total file size: by default, automatic extraction is allowed only for files up to 350 MiB.
+- Mount point reuse, including mount points created in a separate namespace.
+- Delayed unmount after the mount is no longer in use: seconds, minutes, hours, or no time limit.
+- An explicit mount or extraction directory and a separate FUSE debug mode.
 
-# URUNTIME_EXTRACT=3 - As above, but if the image size is less than 350 MB (default)
-sed -i 's|URUNTIME_EXTRACT=[0-9]|URUNTIME_EXTRACT=3|' /path/uruntime
-```
+### DwarFS
 
-* `URUNTIME_CLEANUP` - Specifies the logic of cleanup after extract and run
-```
-# URUNTIME_CLEANUP=0 - Disable extracting directory cleanup
-sed -i 's|URUNTIME_CLEANUP=[0-9]|URUNTIME_CLEANUP=0|' /path/uruntime
+- Configurable worker count, cache size, block size, and readahead.
+- Automatic reduction of the cache and worker count when available memory is low.
+- Preloading of all blocks or the default `hotness` category.
+- An `analysis_file` containing file access statistics. This profile can be passed to `mkdwarfs` the next time the image is built.
+- A choice of `malloc` or `mmap` for block allocation.
 
-# URUNTIME_CLEANUP=1 - Enable extracting directory cleanup (default)
-sed -i 's|URUNTIME_CLEANUP=[0-9]|URUNTIME_CLEANUP=1|' /path/uruntime
-```
+### Embedded tools and configuration
 
-* `URUNTIME_UNSHARE` - Specifies whether to try using unshare user and mount namespaces by default
-```
-# URUNTIME_UNSHARE=0 - Don't run in unshare mode by default (default)
-sed -i 's|URUNTIME_UNSHARE=[0-9]|URUNTIME_UNSHARE=0|' /path/uruntime
+- Direct invocation of `squashfuse`, `unsquashfs`, `sqfscat`, `mksquashfs`, `sqfstar`, `dwarfs`, `dwarfsck`, `mkdwarfs`, and `dwarfsextract` when the selected runtime variant includes the tool.
+- Helper invocation through a runtime option or through a hard link, symbolic link, or runtime copy named after the tool.
+- Updating embedded environment variables, update information, and signatures from a string or file.
+- Loading variables from the embedded section and adjacent `${RUNTIME_NAME}.env` file; the `unset NAME` directive removes a variable.
+- Four portable directories beside the image: home, data, config, and cache.
 
-# URUNTIME_UNSHARE=1 - Run in unshare mode by default
-sed -i 's|URUNTIME_UNSHARE=[0-9]|URUNTIME_UNSHARE=1|' /path/uruntime
-```
+### Isolation
 
-* `URUNTIME_MOUNT` - Specifies the mount logic
-```
-# URUNTIME_MOUNT=0 - Reuse mount point and disable unmounting of the mount directory
-sed -i 's|URUNTIME_MOUNT=[0-9]|URUNTIME_MOUNT=0|' /path/uruntime
+`unshare` creates user and mount namespaces and supports UID/GID mapping. This also allows mounting without a SUID `fusermount` on systems where user namespaces are available.
 
-# URUNTIME_MOUNT=1 - Random mount points and unmounting of the mount directory
-sed -i 's|URUNTIME_MOUNT=[0-9]|URUNTIME_MOUNT=1|' /path/uruntime
+`APPIMAGE_UNSHARE=2` and `RUNIMAGE_UNSHARE=2` enable `unshare` and drop capabilities before starting the main child process. The embedded `URUNTIME_UNSHARE=2` mode has the same behavior by default. Value `3` keeps normal mounting as the first choice and drops capabilities only when `unshare` is entered automatically as a fallback. Capabilities are dropped only after a namespace has been created or re-entered successfully, and only for the launched application; filesystem helpers retain the privileges needed for mounting.
 
-# URUNTIME_MOUNT=2 - Reuse mount point and unmounting of the mount directory 
-#                    with a 30 minutes delay of inactivity
-sed -i 's|URUNTIME_MOUNT=[0-9]|URUNTIME_MOUNT=2|' /path/uruntime
+## Supported architectures
 
-# URUNTIME_MOUNT=3 - Reuse mount point and unmounting of the mount directory 
-#                    with a 5 second delay of inactivity (default)
-sed -i 's|URUNTIME_MOUNT=[0-9]|URUNTIME_MOUNT=3|' /path/uruntime
-```
+| Artifact architecture | Rust target | Byte order |
+|---|---|---|
+| `x86_64` | `x86_64-unknown-linux-musl` | little-endian |
+| `aarch64` | `aarch64-unknown-linux-musl` | little-endian |
+| `riscv64` | `riscv64gc-unknown-linux-musl` | little-endian |
+| `loongarch64` | `loongarch64-unknown-linux-musl` | little-endian |
+| `ppc64` | `powerpc64-unknown-linux-musl` | big-endian |
+| `ppc64le` | `powerpc64le-unknown-linux-musl` | little-endian |
 
-<details><summary style="font-size: 15px;"><b>
-RunImage runtime usage
-</b></summary>
+`ppc64` and `ppc64le` share the Rust `target_arch` value `powerpc64`, so runtimes and helpers are selected by the complete Rust target. Big-endian and little-endian artifacts are not interchangeable.
 
-```
-   Runtime options:
-    --runtime-extract [PATTERN]          Extract content from embedded filesystem image
-                                             If pattern is passed, only extract matching files
-     --runtime-extract-and-run [ARGS]    Run the RunImage afer extraction without using FUSE
-     --runtime-offset                    Print byte offset to start of embedded filesystem image
-     --runtime-portable-home             Create a portable home folder to use as $HOME
-     --runtime-portable-share            Create a portable share folder to use as $XDG_DATA_HOME
-     --runtime-portable-config           Create a portable config folder to use as $XDG_CONFIG_HOME
-     --runtime-portable-cache            Create a portable cache folder to use as $XDG_CACHE_HOME
-     --runtime-help                      Print this help
-     --runtime-unshare                   Try to use unshare user and mount namespaces
-     --runtime-version                   Print version of Runtime
-     --runtime-signature                 Print digital signature embedded in RunImage
-     --runtime-addsign    'SIGN|/file'   Add digital signature to RunImage
-     --runtime-updateinfo[rmation]       Print update info embedded in RunImage
-     --runtime-addupdinfo 'INFO|/file'   Add update info to RunImage
-     --runtime-envs                      Print environment variables embedded in RunImage
-     --runtime-addenvs    'ENVS|/file'   Add environment variables to RunImage
-     --runtime-mount                     Mount embedded filesystem image and print
-                                             mount point and wait for kill with Ctrl-C
+All six targets are implemented in `build.rs`, `xtask`, and the CI matrix. At the time v0.7.0 was prepared, full release CI validation for all six architectures had not yet completed. A target's presence in this table does not mean that all 54 artifacts for the new release have already been published and verified.
 
-    Embedded tools options:
-      --runtime-squashfuse    [ARGS]       Launch squashfuse
-      --runtime-unsquashfs    [ARGS]       Launch unsquashfs
-      --runtime-sqfscat       [ARGS]       Launch sqfscat
-      --runtime-mksquashfs    [ARGS]       Launch mksquashfs
-      --runtime-sqfstar       [ARGS]       Launch sqfstar
-      --runtime-dwarfs        [ARGS]       Launch dwarfs
-      --runtime-dwarfsck      [ARGS]       Launch dwarfsck
-      --runtime-mkdwarfs      [ARGS]       Launch mkdwarfs
-      --runtime-dwarfsextract [ARGS]       Launch dwarfsextract
+## Runtime variants
 
-      Also you can create a hardlink, symlink or rename the runtime with
-      the name of the built-in utility to use it directly.
+For each architecture, `cargo xtask` generates nine variants. The complete filename is `uruntime-<variant>-<architecture>`.
 
-    Portable home and config:
+| Variant | Format | Filesystems | Contents |
+|---|---|---|---|
+| `runimage` | RunImage | SquashFS + DwarFS | full |
+| `runimage-squashfs` | RunImage | SquashFS | full |
+| `runimage-dwarfs` | RunImage | DwarFS | full |
+| `appimage` | AppImage | SquashFS + DwarFS | full |
+| `appimage-lite` | AppImage | SquashFS + DwarFS | no creation/checking tools |
+| `appimage-squashfs` | AppImage | SquashFS | full |
+| `appimage-squashfs-lite` | AppImage | SquashFS | no `mksquashfs` or `sqfstar` |
+| `appimage-dwarfs` | AppImage | DwarFS | full |
+| `appimage-dwarfs-lite` | AppImage | DwarFS | no `dwarfsck` or `mkdwarfs` |
 
-      If you would like the application contained inside this RunImage to store its
-      data alongside this RunImage rather than in your home directory, then you can
-      place a directory named
+Lite variants retain the tools needed for mounting and extraction. Full variants can also create and check images.
 
-      for portable-home:
-      "${RUNTIME_NAME}.home"
+## Projects using uruntime
 
-      for portable-share:
-      "${RUNTIME_NAME}.share"
+The following projects have public build scripts that confirm direct use of `uruntime` or use through `quick-sharun`:
 
-      for portable-config:
-      "${RUNTIME_NAME}.config"
-      
-      for portable-cache:
-      "${RUNTIME_NAME}.cache"
+- [AnyLinux-AppImages](https://github.com/pkgforge-dev/Anylinux-AppImages/blob/main/useful-tools/quick-sharun.sh#L3853-L3855), a collection of scripts and AppImage builds for different Linux systems.
+- [GOverlay](https://github.com/benjamimgois/goverlay/blob/main/appimage/goverlay-appimage.sh#L101-L102), a graphical configuration tool for MangoHud, vkBasalt, and other gaming tools.
+- [Ghostty AppImage](https://github.com/pkgforge-dev/ghostty-appimage/blob/main/bin/bundle-appimage.sh#L9-L18), an AppImage build of the Ghostty terminal.
+- [Interstellar](https://github.com/interstellar-app/interstellar/blob/main/scripts/build-appimage.sh#L10-L45), a client for Mbin, Lemmy, and PieFed.
+- [QDiskInfo](https://github.com/edisionnano/QDiskInfo/blob/main/qdiskinfo-appimage.sh#L70-L73), a graphical interface for `smartctl` and drive SMART data.
+- [CPU-X](https://github.com/TheTumultuousUnicornOfDarkness/CPU-X/blob/master/scripts/build_appimage.sh#L132-L139), a viewer for processor, motherboard, and other hardware information.
+- [Eden](https://git.eden-emu.dev/eden-emu/eden/src/commit/1f091191f2d28289c6f7d237ea9f1fd6dd2333cd/.ci/package-appimage.sh), a Nintendo Switch emulator.
+- [PPSSPP](https://github.com/hrydgard/ppsspp/blob/master/scripts/makeappimage_64-bit.sh#L24-L26), a PlayStation Portable emulator.
+- [RPCS3](https://github.com/RPCS3/rpcs3/blob/master/.ci/deploy-linux.sh#L57-L60), a PlayStation 3 emulator.
+- [Converseen](https://github.com/Faster3ck/Converseen/blob/main/package/AppImage/converseen-appimage.sh#L53-L55), a batch image conversion and resizing tool.
+- [MangoJuice](https://github.com/radiolamp/mangojuice/releases/tag/1.0.0), a graphical configuration tool for MangoHud.
+- [RSS Guard](https://github.com/martinrotter/rssguard/releases/tag/5.2.5), a client for RSS, Atom, and other feed formats.
 
-      Or you can invoke this RunImage with the --runtime-portable-home or
-      --runtime-portable-share or --runtime-portable-config or
-      --runtime-portable-cache option, which will create this directory for you.
-      As long as the directory exists and is neither moved nor renamed, the
-      application contained inside this RunImage to store its data in this
-      directory rather than in your home directory
+For MangoJuice and RSS Guard, the evidence comes from the official release AppImages themselves rather than a reference to `quick-sharun` in source code. The files were inspected without executing them:
 
-    Environment variables:
+| Project | Tag and file | SHA-256 | Evidence |
+|---|---|---|---|
+| MangoJuice | [`1.0.0 / MangoJuice-1.0.0-x86_64.AppImage`](https://github.com/radiolamp/mangojuice/releases/download/1.0.0/MangoJuice-1.0.0-x86_64.AppImage) | `3b603eca0aff333c5606faad2913020397858bc4842089493e00992bb6b0ec73` | ELF64 x86-64, AppImage magic `AI\x02`; string `Repository: https://github.com/VHSgunzo/uruntime` at offset 348459. |
+| RSS Guard | [`5.2.5 / rssguard-5.2.5-text-qt5-linux64.AppImage`](https://github.com/martinrotter/rssguard/releases/download/5.2.5/rssguard-5.2.5-text-qt5-linux64.AppImage) | `f5641941bce03b259647c30513b730770b099d5fef6accb32d208ed990702ed7` | ELF64 x86-64, AppImage magic `AI\x02`; string `Repository: https://github.com/VHSgunzo/uruntime` at offset 348459. |
 
-      URUNTIME                       Path to uruntime
-      URUNTIME_DIR                   Path to uruntime directory
-      RUNIMAGE_UNSHARE=1             Try to use unshare user and mount namespaces
-      RUNIMAGE_UNSHARE_ROOT=1        Map to root (UID 0, GID 0) in user namespace
-      RUNIMAGE_UNSHARE_UID=0         Map to specified UID in user namespace
-      RUNIMAGE_UNSHARE_GID=0         Map to specified GID in user namespace
-      RUNTIME_EXTRACT_AND_RUN=1      Run the RunImage afer extraction without using FUSE
-      NO_CLEANUP=1                   Do not clear the unpacking directory after closing when
-                                       using extract and run option for reuse extracted data
-      NO_UNMOUNT=1                   Do not unmount the mount directory after closing 
-                                      for reuse mount point
-      TMPDIR=/path                   Specifies a custom path for mounting or extracting the image
-      RUNIMAGE_TARGET_DIR=/path      Specifies the exact path for mounting or extracting the image
-      REUSE_CHECK_DELAY=5s           Specifies the delay between checks of using the image dir (0|inf|1|1s|1m|1h)
-      FUSERMOUNT_PROG=/path          Specifies a custom path for fusermount
-      ENABLE_FUSE_DEBUG=1            Enables debug mode for the mounted filesystem
-      TARGET_RUNIMAGE=/path          Operate on a target RunImage rather than this file itself
-      NO_MEMFDEXEC=1                 Do not use memfd-exec (use a temporary file instead)
-      DWARFS_WORKERS=2               Number of worker threads for DwarFS (default: equal CPU threads)
-      DWARFS_CACHESIZE=1024M         Size of the block cache, in bytes for DwarFS (suffixes K, M, G)
-      DWARFS_BLOCKSIZE=512K          Size of the block file I/O, in bytes for DwarFS (suffixes K, M, G)
-      DWARFS_READAHEAD=32M           Set readahead size, in bytes for DwarFS (suffixes K, M, G)
-      DWARFS_PRELOAD_ALL=1           Enable preloading of all blocks from the DwarFS file system
-      DWARFS_ANALYSIS_FILE=/path     A file for profiling open files when launching the application for DwarFS
-      DWARFS_USE_MMAP=1              Use mmap for allocating blocks for DwarFS
+## Getting a prebuilt runtime
 
-      Environment variables can be specified in the env file (see https://crates.io/crates/dotenv)
-      and environment variables can also be deleted using `unset ENV_VAR` in the end of the env file:
-      "${RUNTIME_NAME}.env"
-      You can also embed environment variables directly into runtime using the --runtime-addenvs option.
+Prebuilt files are published on the [Releases](https://github.com/VHSgunzo/uruntime/releases) page. Choose a variant and architecture from the tables above, then make the file executable:
+
+```sh
+chmod +x uruntime-appimage-x86_64
+./uruntime-appimage-x86_64 --appimage-help
 ```
 
-</details> 
+The option prefix depends on the format:
 
-<details><summary style="font-size: 15px;"><b>
-AppImage runtime usage
-</b></summary>
+- AppImage: `--appimage-*`, with `APPIMAGE_*` variables;
+- RunImage: `--runtime-*`, with `RUNIMAGE_*` variables.
 
-```
-   Runtime options:
-    --appimage-extract [PATTERN]          Extract content from embedded filesystem image
-                                             If pattern is passed, only extract matching files
-     --appimage-extract-and-run [ARGS]    Run the AppImage afer extraction without using FUSE
-     --appimage-offset                    Print byte offset to start of embedded filesystem image
-     --appimage-portable-home             Create a portable home folder to use as $HOME
-     --appimage-portable-share            Create a portable share folder to use as $XDG_DATA_HOME
-     --appimage-portable-config           Create a portable config folder to use as $XDG_CONFIG_HOME
-     --appimage-portable-cache            Create a portable cache folder to use as $XDG_CACHE_HOME
-     --appimage-help                      Print this help
-     --appimage-unshare                   Try to use unshare user and mount namespaces
-     --appimage-version                   Print version of Runtime
-     --appimage-signature                 Print digital signature embedded in AppImage
-     --appimage-addsign    'SIGN|/file'   Add digital signature to AppImage
-     --appimage-updateinfo[rmation]       Print update info embedded in AppImage
-     --appimage-addupdinfo 'INFO|/file'   Add update info to AppImage
-     --appimage-envs                      Print environment variables embedded in AppImage
-     --appimage-addenvs    'ENVS|/file'   Add environment variables to AppImage
-     --appimage-mount                     Mount embedded filesystem image and print
-                                             mount point and wait for kill with Ctrl-C
+In the reference below, `<prefix>` means `appimage` or `runtime`, and `<ENV>` means `APPIMAGE` or `RUNIMAGE`.
 
-    Embedded tools options:
-      --appimage-squashfuse    [ARGS]       Launch squashfuse
-      --appimage-unsquashfs    [ARGS]       Launch unsquashfs
-      --appimage-sqfscat       [ARGS]       Launch sqfscat
-      --appimage-mksquashfs    [ARGS]       Launch mksquashfs
-      --appimage-sqfstar       [ARGS]       Launch sqfstar
-      --appimage-dwarfs        [ARGS]       Launch dwarfs
-      --appimage-dwarfsck      [ARGS]       Launch dwarfsck
-      --appimage-mkdwarfs      [ARGS]       Launch mkdwarfs
-      --appimage-dwarfsextract [ARGS]       Launch dwarfsextract
+## Usage
 
-      Also you can create a hardlink, symlink or rename the runtime with
-      the name of the built-in utility to use it directly.
+### Main options
 
-    Portable home and config:
+| Option | Action |
+|---|---|
+| `--<prefix>-extract [PATTERN]` | Extract the image into the current directory; if a pattern is provided, extract only matching paths. |
+| `--<prefix>-extract-and-run [ARGS]` | Extract the image and run the application without FUSE. |
+| `--<prefix>-offset` | Print the byte offset where the filesystem image begins. |
+| `--<prefix>-mount` | Mount the image, print the mount point, and wait for `Ctrl-C`. |
+| `--<prefix>-unshare` | Try to create user and mount namespaces. |
+| `--<prefix>-unshare-root` | Enable `unshare` and map the current user to UID 0 and GID 0. |
+| `--<prefix>-unshare-uid UID` | Enable `unshare` and map the current UID to `UID`. The `--...-uid=UID` form is also accepted. |
+| `--<prefix>-unshare-gid GID` | Enable `unshare` and map the current GID to `GID`. The `--...-gid=GID` form is also accepted. |
+| `--<prefix>-unshare-drop-caps` | Enable `unshare` and drop capabilities before starting the application. |
+| `--<prefix>-unshare-fallback-drop-caps` | Keep normal mounting as the first choice and drop capabilities if `unshare` is selected automatically as a fallback. |
+| `--<prefix>-portable-home` | Create `${RUNTIME_NAME}.home`. |
+| `--<prefix>-portable-share` | Create `${RUNTIME_NAME}.share`. |
+| `--<prefix>-portable-config` | Create `${RUNTIME_NAME}.config`. |
+| `--<prefix>-portable-cache` | Create `${RUNTIME_NAME}.cache`. |
+| `--<prefix>-help` | Show help for the selected runtime. |
+| `--<prefix>-version` | Print the runtime version. |
+| `--<prefix>-signature` | Print the embedded digital signature. |
+| `--<prefix>-addsign 'SIGN\|/file'` | Write a signature from an argument or file. |
+| `--<prefix>-updateinfo` | Print update information. The full form `--<prefix>-updateinformation` is also accepted. |
+| `--<prefix>-addupdinfo 'INFO\|/file'` | Write update information from an argument or file. |
+| `--<prefix>-envs` | Print the embedded environment. |
+| `--<prefix>-addenvs 'ENVS\|/file'` | Write the environment from an argument or file. |
 
-      If you would like the application contained inside this AppImage to store its
-      data alongside this AppImage rather than in your home directory, then you can
-      place a directory named
+Examples:
 
-      for portable-home:
-      "${RUNTIME_NAME}.home"
+```sh
+# Show the AppImage image offset
+./My.AppImage --appimage-offset
 
-      for portable-config:
-      "${RUNTIME_NAME}.config"
-      
-      for portable-cache:
-      "${RUNTIME_NAME}.cache"
+# Extract only matching files
+./My.AppImage --appimage-extract 'usr/bin/*'
 
-      Or you can invoke this AppImage with the --appimage-portable-home or
-      --appimage-portable-share or --appimage-portable-config or
-      --appimage-portable-cache option, which will create this directory for you.
-      As long as the directory exists and is neither moved nor renamed, the
-      application contained inside this AppImage to store its data in this
-      directory rather than in your home directory
+# Run without FUSE
+./My.AppImage --appimage-extract-and-run --help
 
-    Environment variables:
+# Write update information to a finished image
+./My.AppImage --appimage-addupdinfo \
+  'gh-releases-zsync|owner|project|latest|*.AppImage.zsync'
 
-      URUNTIME                       Path to uruntime
-      URUNTIME_DIR                   Path to uruntime directory
-      APPIMAGE_UNSHARE=1             Try to use unshare user and mount namespaces
-      APPIMAGE_UNSHARE_ROOT=1        Map to root (UID 0, GID 0) in user namespace
-      APPIMAGE_UNSHARE_UID=0         Map to specified UID in user namespace
-      APPIMAGE_UNSHARE_GID=0         Map to specified GID in user namespace
-      APPIMAGE_EXTRACT_AND_RUN=1     Run the AppImage afer extraction without using FUSE
-      NO_CLEANUP=1                   Do not clear the unpacking directory after closing when
-                                       using extract and run option for reuse extracted data
-      NO_UNMOUNT=1                   Do not unmount the mount directory after closing 
-                                      for reuse mount point
-      TMPDIR=/path                   Specifies a custom path for mounting or extracting the image
-      APPIMAGE_TARGET_DIR=/path      Specifies the exact path for mounting or extracting the image
-      REUSE_CHECK_DELAY=5s           Specifies the delay between checks of using the image dir (0|inf|1|1s|1m|1h)
-      FUSERMOUNT_PROG=/path          Specifies a custom path for fusermount
-      ENABLE_FUSE_DEBUG=1            Enables debug mode for the mounted filesystem
-      TARGET_APPIMAGE=/path          Operate on a target AppImage rather than this file itself
-      NO_MEMFDEXEC=1                 Do not use memfd-exec (use a temporary file instead)
-      DWARFS_WORKERS=2               Number of worker threads for DwarFS (default: equal CPU threads)
-      DWARFS_CACHESIZE=1024M         Size of the block cache, in bytes for DwarFS (suffixes K, M, G)
-      DWARFS_BLOCKSIZE=512K          Size of the block file I/O, in bytes for DwarFS (suffixes K, M, G)
-      DWARFS_READAHEAD=32M           Set readahead size, in bytes for DwarFS (suffixes K, M, G)
-      DWARFS_PRELOAD_ALL=1           Enable preloading of all blocks from the DwarFS file system
-      DWARFS_ANALYSIS_FILE=/path     A file for profiling open files when launching the application for DwarFS
-      DWARFS_USE_MMAP=1              Use mmap for allocating blocks for DwarFS
-      
-      Environment variables can be specified in the env file (see https://crates.io/crates/dotenv)
-      and environment variables can also be deleted using `unset ENV_VAR` in the end of the env file:
-      "${RUNTIME_NAME}.env"
-      You can also embed environment variables directly into runtime using the --appimage-addenvs option.
+# Embed an environment from a file
+./My.AppImage --appimage-addenvs ./app.env
 ```
 
-</details> 
+The value for `addsign`, `addupdinfo`, or `addenvs` must fit in the preallocated ELF section. Current sizes are 1024 bytes for the signature and update information and 16 KiB for the environment. The command fills the unused remainder with zero bytes.
+
+### Embedded CLI tools
+
+| Option | Tool | Availability |
+|---|---|---|
+| `--<prefix>-squashfuse [ARGS]` | `squashfuse` | variants with SquashFS |
+| `--<prefix>-unsquashfs [ARGS]` | `unsquashfs` | variants with SquashFS |
+| `--<prefix>-sqfscat [ARGS]` | `sqfscat` | variants with SquashFS |
+| `--<prefix>-mksquashfs [ARGS]` | `mksquashfs` | full variants with SquashFS |
+| `--<prefix>-sqfstar [ARGS]` | `sqfstar` | full variants with SquashFS |
+| `--<prefix>-dwarfs [ARGS]` | `dwarfs` | variants with DwarFS |
+| `--<prefix>-dwarfsck [ARGS]` | `dwarfsck` | full variants with DwarFS |
+| `--<prefix>-mkdwarfs [ARGS]` | `mkdwarfs` | full variants with DwarFS |
+| `--<prefix>-dwarfsextract [ARGS]` | `dwarfsextract` | variants with DwarFS |
+
+The same tool can be invoked through the filename:
+
+```sh
+ln uruntime-appimage-x86_64 mksquashfs
+./mksquashfs --help
+```
+
+### Portable directories
+
+If the following directories exist beside the image, the runtime changes the corresponding variables before starting the application:
+
+| Directory | Variable |
+|---|---|
+| `${RUNTIME_NAME}.home` | `HOME` |
+| `${RUNTIME_NAME}.share` | `XDG_DATA_HOME` |
+| `${RUNTIME_NAME}.config` | `XDG_CONFIG_HOME` |
+| `${RUNTIME_NAME}.cache` | `XDG_CACHE_HOME` |
+
+You can create them with the matching `--<prefix>-portable-*` options. The directories are tied to the file's current name and location.
+
+## Local builds
+
+The repository uses nightly Rust from `rust-toolchain.toml` and Cargo `build-std`. Install Rust and the `rust-src` component. Preparing helpers and publishing files to `dist/` also requires `curl` and `llvm-objcopy`; automatic Zig installation requires `tar` with XZ support.
+
+```sh
+git clone https://github.com/VHSgunzo/uruntime.git
+cd uruntime
+rustup component add rust-src
+
+# List targets and all 54 tasks
+cargo xtask help
+
+# Run all local checks for the current platform's musl target
+cargo xtask check
+
+# Do the same for an explicitly selected supported Rust target
+cargo xtask check x86_64-unknown-linux-musl
+
+# Build nine variants for an architecture
+cargo xtask x86_64
+cargo xtask aarch64
+
+# Build one variant
+cargo xtask appimage-squashfs-riscv64
+
+# Build the full matrix: 6 architectures x 9 variants
+cargo xtask all
+```
+
+Each successful task creates `dist/uruntime-<variant>-<arch>`.
+
+`cargo xtask check` detects the musl target for the current Linux platform. For example, it uses `x86_64-unknown-linux-musl` on `x86_64` and `aarch64-unknown-linux-musl` on `aarch64`. The command runs `cargo fmt --check`, Check, Clippy with `-D warnings`, tests for the root package and `xtask`, validation of all checksums, and `git diff --check`. One of the six Rust targets can be passed explicitly as a second argument. A foreign target uses the same pinned Zig linker backend as a build and requires its matching QEMU user-mode runner to execute the root tests.
+
+For the host architecture, `xtask` runs a regular `cargo build` with the native linker. Cargo is the only compiler backend needed; Zig and a separate cross backend are not used. For a foreign target, the same Cargo invocation receives the project-provided Zig linker wrapper. The pinned Zig 0.16.0 is downloaded automatically to `target/toolchains/`, verified against its SHA-256, and reused. Automatic downloads are supported on Linux hosts with `x86_64`, `aarch64`, `riscv64`, `loongarch64`, or `powerpc64le`. On another host, set `URUNTIME_ZIG`; running `zig version` for the selected file must return exactly `0.16.0`.
+
+QEMU is not involved in the build and is not needed to extract DwarFS helpers. It is used only to run `--version` on finished foreign-architecture files during smoke tests.
+
+`build.rs` pins DwarFS 0.15.7, squashfs-tools 4.7.5.r2, and squashfuse 0.6.3.r2. Normal builds do not depend on UPX. DwarFS publishes Zstd self-extracting wrappers; `build.rs` parses the `SQUEEZE!` trailer, checks the size and XXH64, extracts the target ELF on the host, and then verifies the SHA-256 and ELF machine/endian. The foreign ELF is never executed during this process.
+
+## Verifying and updating checksums
+
+`checksums.txt` pins two checksums for every filesystem helper: the downloaded file and the extracted payload. It also records the URLs and SHA-256 values of Zig archives for supported Linux hosts.
+
+```sh
+# Download the sources, recompute the data, and check for drift
+cargo xtask update-checksums --check
+
+# Update checksums.txt after an intentional version or URL change
+cargo xtask update-checksums
+
+git diff -- checksums.txt
+```
+
+Both commands access the network and check all 30 helper sources, not just the current architecture. Always review the diff after an update. `URUNTIME_CURL=/path/to/curl` selects the download program for both `build.rs` and `update-checksums`.
+
+## CI builds
+
+The `.github/workflows/ci.yml` workflow has three parts:
+
+1. Preflight runs the canonical `cargo xtask check` command: formatting, Check, Clippy, Rust tests, `xtask` tests, pinned helper/Zig validation, and `git diff --check`.
+2. Six independent build jobs run `cargo xtask <arch>`, verify the exact list of nine files, ELF64 machine/endian, absence of `PT_INTERP` and `DT_NEEDED`, required sections, and runtime magic; foreign jobs run `--version` through QEMU.
+3. On a tag push, the release job builds exactly 54 files and publishes them through a verified draft stage. A rerun can safely refresh the release for the same tag: old assets are deleted only after the release becomes a draft, and it is made public again only after the new complete manifest has been verified.
+
+A QEMU smoke test does not replace a FUSE mount test on a foreign architecture. Full mount/run behavior must be tested separately where the runner provides a working `/dev/fuse`.
+
+[RELEASING.md](RELEASING.md) describes the step-by-step process for updating the code, Rust dependencies, helpers, and Zig, and for creating or reissuing a tag.
+
+## Embedded configuration
+
+Four strings are stored directly in the runtime ELF. In the current build they are `URUNTIME_MOUNT=3`, `URUNTIME_CLEANUP=1`, `URUNTIME_EXTRACT=3`, and `URUNTIME_UNSHARE=0`. They can be replaced in a finished runtime, including after an image has been appended. The value must remain a single digit so that the file size and image offset do not change.
+
+### `URUNTIME_EXTRACT`
+
+| Value | Behavior |
+|---|---|
+| `0` | Use only a FUSE mount; do not extract automatically. |
+| `1` | Always extract and run without FUSE. |
+| `2` | Try FUSE first; on failure, extract regardless of file size. |
+| `3` | Try FUSE first; on failure, extract only if the file is no larger than 350 MiB. This is the default. |
+
+```sh
+sed -i 's|URUNTIME_EXTRACT=[0-9]|URUNTIME_EXTRACT=2|' /path/to/runtime
+```
+
+The explicit `--<prefix>-mount` option never falls back to extraction. The `--<prefix>-extract` option works independently of the fallback mode.
+
+### `URUNTIME_CLEANUP`
+
+| Value | Behavior |
+|---|---|
+| `0` | Do not remove the directory after extract-and-run. |
+| `1` | Remove the extracted directory after the application exits and the wait period ends. This is the default. |
+
+```sh
+sed -i 's|URUNTIME_CLEANUP=[0-9]|URUNTIME_CLEANUP=0|' /path/to/runtime
+```
+
+`NO_CLEANUP=1` overrides cleanup for one run in extraction mode.
+
+### `URUNTIME_UNSHARE`
+
+| Value | Behavior |
+|---|---|
+| `0` | Do not enable `unshare` in advance. The runtime may still try it if FUSE is unavailable without a SUID `fusermount`. This is the default. |
+| `1` | Create user and mount namespaces by default. |
+| `2` | Create namespaces and drop capabilities before starting the application. |
+| `3` | Do not enable `unshare` in advance. If the runtime enters `unshare` automatically as a fallback, drop capabilities before starting the application. Explicit `--<prefix>-unshare` and `<ENV>_UNSHARE=1` requests do not enable capability dropping by themselves. |
+
+```sh
+sed -i 's|URUNTIME_UNSHARE=[0-9]|URUNTIME_UNSHARE=2|' /path/to/runtime
+```
+
+Use mode `3` when normal FUSE mounting should remain the first attempt, but an automatically selected `unshare` fallback must launch the application without ambient, bounding, effective, permitted, or inheritable capabilities:
+
+```sh
+sed -i 's|URUNTIME_UNSHARE=[0-9]|URUNTIME_UNSHARE=3|' /path/to/runtime
+```
+
+### `URUNTIME_MOUNT`
+
+| Value | Behavior |
+|---|---|
+| `0` | Reuse a stable mount point; by default, the FUSE mount remains mounted indefinitely. |
+| `1` | Use a random mount point and unmount after the application exits. |
+| `2` | Use a stable mount point and unmount after 30 minutes without use. |
+| `3` | Use a stable mount point and unmount after 5 seconds without use. This is the default. |
+
+```sh
+sed -i 's|URUNTIME_MOUNT=[0-9]|URUNTIME_MOUNT=1|' /path/to/runtime
+```
+
+`REUSE_CHECK_DELAY` changes the delay for reuse modes. `NO_UNMOUNT=1` keeps the mount indefinitely for one run.
+
+## Environment variables
+
+### Paths and launch mode
+
+| Variable | Value |
+|---|---|
+| `URUNTIME` | Path to the executable runtime processing the image. The runtime sets this variable itself. |
+| `URUNTIME_DIR` | Directory containing this runtime. The runtime sets this variable itself. |
+| `<ENV>_EXTRACT_AND_RUN=1` | Extract and run without FUSE. |
+| `NO_CLEANUP=1` | Do not remove data after extract-and-run. |
+| `NO_UNMOUNT=1` | Do not unmount the image after the application exits; enables mount point reuse. |
+| `TMPDIR=/path` | Base temporary directory for mounting or extraction. |
+| `<ENV>_TARGET_DIR=/path` | Exact directory for mounting or extraction. |
+| `REUSE_CHECK_DELAY=5s` | Delay before checking whether the directory is in use. Accepts an integer number of seconds or one `s`, `m`, or `h` suffix; `inf` disables the timeout, while `0` disables reuse. An invalid value produces a one-second delay. |
+| `FUSERMOUNT_PROG=/path` | Explicit path to a SUID `fusermount`/`fusermount3`. |
+| `ENABLE_FUSE_DEBUG=1` | Enable debug output from the selected FUSE helper. |
+| `TARGET_<ENV>=/path` | Perform a maintenance operation on the specified AppImage/RunImage instead of the runtime itself. |
+| `NO_MEMFDEXEC=1` | Run the extracted helper through a temporary file instead of `memfd-exec`. |
+
+AppImage uses `APPIMAGE_EXTRACT_AND_RUN`, `APPIMAGE_TARGET_DIR`, and `TARGET_APPIMAGE`. RunImage uses `RUNIMAGE_EXTRACT_AND_RUN`, `RUNIMAGE_TARGET_DIR`, and `TARGET_RUNIMAGE`.
+
+### `unshare` and UID/GID mapping
+
+| Variable | Value |
+|---|---|
+| `<ENV>_UNSHARE=1` | Create user and mount namespaces. |
+| `<ENV>_UNSHARE=2` | Create namespaces and drop ambient, bounding, effective, permitted, and inheritable capabilities before starting the application. |
+| `<ENV>_UNSHARE=3` | Do not enable `unshare` in advance; drop capabilities if it is selected automatically as a fallback. |
+| `<ENV>_UNSHARE_ROOT=1` | Map the current user to UID 0 and GID 0 inside the user namespace. |
+| `<ENV>_UNSHARE_UID=<uid>` | Map the current UID to the specified UID inside the namespace. |
+| `<ENV>_UNSHARE_GID=<gid>` | Map the current GID to the specified GID inside the namespace. |
+
+
+Substituting `<ENV>` gives the complete set of `APPIMAGE_*` or `RUNIMAGE_*` variables. Any UID/GID mapping also enables `unshare`. If `*_UNSHARE_ROOT=1` or `--<prefix>-unshare-root` is set, root mapping takes precedence over separate UID/GID values from either CLI options or environment variables.
+
+The CLI options can be combined. For example:
+
+```sh
+./My.AppImage \
+  --appimage-unshare-uid 1000 \
+  --appimage-unshare-gid 1000 \
+  --appimage-unshare-drop-caps
+```
+
+When an ordinary `unshare` request and a capability-drop mode are both present, capability dropping takes precedence. Use `--` to stop runtime option parsing and pass the following arguments unchanged to the application; the separator itself is consumed by the runtime.
+
+### DwarFS settings
+
+| Variable | Value |
+|---|---|
+| `DWARFS_WORKERS=2` | Explicit number of worker threads. Without this variable, the runtime selects the count based on cache size and CPU count. |
+| `DWARFS_CACHESIZE=1024M` | Block cache size. The `K`, `M`, and `G` suffixes are supported. Without this variable, the size is selected from available memory; 1024M is the fallback if `/proc` is unavailable. |
+| `DWARFS_BLOCKSIZE=512K` | Block I/O size; the default is 512K. |
+| `DWARFS_READAHEAD=32M` | Readahead size; the default is 32M. |
+| `DWARFS_PRELOAD_ALL=1` | Preload all blocks; without this variable, `preload_category=hotness` is used. |
+| `DWARFS_ANALYSIS_FILE=/path` | Write a profile of opened files to the specified file. |
+| `DWARFS_USE_MMAP=1` | Use the `mmap` block allocator; without this variable, `malloc` is used. |
+
+### The `.env` file and embedded environment
+
+The runtime processes the embedded `.envs` section first and then the adjacent file:
+
+```text
+${RUNTIME_NAME}.env
+```
+
+For example, `/opt/My.AppImage` uses `/opt/My.AppImage.env`. Variable syntax follows the project's [`dotenv`](https://github.com/VHSgunzo/dotenv) fork. After each source is read, lines in the form `unset NAME` remove the specified variables:
+
+```dotenv
+QT_QPA_PLATFORM=xcb
+APP_DEBUG=1
+unset LD_PRELOAD
+```
+
+Embed such a file with:
+
+```sh
+./My.AppImage --appimage-addenvs ./My.AppImage.env
+```
+
+The external file is useful for local changes, while the embedded section travels with the image.
+
+## License
+
+[MIT](LICENSE)

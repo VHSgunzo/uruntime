@@ -3,42 +3,344 @@ name: CI
 on:
   push:
     branches:
-    - action
+      - action
     tags:
-    - '*'
+      - '*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build_and_release:
-    name: uruntime
-    runs-on: ubuntu-latest
+  preflight:
+    name: Validate pinned downloads
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install preflight dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools python3-yaml
+          rustup component add rust-src rustfmt clippy
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Run local quality gates and checksum validation
+        run: cargo --locked xtask check
+
+      - name: Test CI artifact and workflow contracts
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s tests -p 'test_ci_*.py' -v
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: preflight
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - aarch64
+          - riscv64
+          - loongarch64
+          - ppc64
+          - ppc64le
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils curl llvm musl-tools xz-utils
+          rustup component add rust-src
+
+      - name: Build all runtime variants
+        run: cargo --locked xtask ${{ matrix.arch }}
+
+      - name: Install QEMU for foreign smoke tests
+        if: matrix.arch != 'x86_64'
+        run: sudo apt-get install --yes qemu-user-static
+
+      - name: Validate artifact manifest, ELF metadata, and smoke tests
+        run: python3 scripts/ci_artifacts.py validate-arch '${{ matrix.arch }}' dist --smoke
+
+      - name: Upload architecture artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: uruntime-${{ matrix.arch }}
+          path: dist/uruntime-*-${{ matrix.arch }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  release:
+    name: Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Setup toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Download all architecture artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          toolchain: nightly
-          override: true
-          target: x86_64-unknown-linux-musl
+          pattern: uruntime-*
+          path: artifacts
 
-      - name: Install deps
-        run: >
-          sudo bash -c 'apt update && apt install binutils curl musl-tools qemu-user-static llvm -y';
-          rustup component add rust-src --toolchain nightly;
-          cargo install cross;
+      - name: Validate and stage the exact release manifest
+        run: python3 scripts/ci_artifacts.py aggregate-release artifacts release-dist
 
-      - name: Build
-        run: cargo xtask all
-
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: dist/uruntime*
+      - name: Verify the remote tag identifies this workflow commit
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          direct=''
+          peeled=''
+          while read -r sha ref; do
+            if [[ "$ref" == "refs/tags/$RELEASE_TAG" ]]; then
+              direct=$sha
+            elif [[ "$ref" == "refs/tags/$RELEASE_TAG^{}" ]]; then
+              peeled=$sha
+            fi
+          done < <(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+          remote_sha=${peeled:-$direct}
+          if [[ -z "$remote_sha" || "$remote_sha" != "$EXPECTED_SHA" ]]; then
+            printf 'remote tag %s resolves to %s, expected %s\n' \
+              "$RELEASE_TAG" "${remote_sha:-<missing>}" "$EXPECTED_SHA" >&2
+            exit 1
+          fi
+
+      - name: Create or refresh the exact-tag draft release
+        id: acquire_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+          RELEASE_BODY: Automated release of the validated uruntime artifacts.
+          RELEASE_MARKER: '<!-- uruntime-ci-managed-release -->'
+        run: |
+          set -euo pipefail
+          releases_file=$(mktemp)
+          response_file=$(mktemp)
+          trap 'rm -f "$releases_file" "$response_file"' EXIT
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_file"
+          release_id=$(python3 - "$releases_file" "$RELEASE_TAG" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              pages = json.load(source)
+          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+              raise SystemExit("invalid paginated release-list response")
+          matches = [release for page in pages for release in page
+                     if isinstance(release, dict) and release.get("tag_name") == sys.argv[2]]
+          if len(matches) > 1:
+              raise SystemExit(f"multiple releases found for exact tag {sys.argv[2]!r}")
+          if matches:
+              release_id = matches[0].get("id")
+              if isinstance(release_id, bool) or not isinstance(release_id, int) or release_id <= 0:
+                  raise SystemExit("exact-tag release has an invalid numeric ID")
+              print(release_id)
+          PY
+          )
+          release_body=$(printf '%s\n\n%s' "$RELEASE_BODY" "$RELEASE_MARKER")
+          if [[ -n "$release_id" ]]; then
+            [[ $release_id =~ ^[0-9]+$ ]]
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              -f "tag_name=$RELEASE_TAG" \
+              -f "target_commitish=$EXPECTED_SHA" \
+              -f "name=$RELEASE_TAG" \
+              -f "body=$release_body" \
+              -F draft=true \
+              -F prerelease=false \
+              -F generate_release_notes=false \
+              -f make_latest=false > "$response_file"
+            release_action=refreshed
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f "tag_name=$RELEASE_TAG" \
+              -f "target_commitish=$EXPECTED_SHA" \
+              -f "name=$RELEASE_TAG" \
+              -f "body=$release_body" \
+              -F draft=true \
+              -F prerelease=false \
+              -F generate_release_notes=false \
+              -f make_latest=false > "$response_file"
+            release_id=$(jq -er '.id | select(type == "number" and . > 0)' "$response_file")
+            [[ $release_id =~ ^[0-9]+$ ]]
+            release_action=created
+          fi
+          jq -e \
+            --argjson id "$release_id" --arg tag "$RELEASE_TAG" \
+            --arg sha "$EXPECTED_SHA" --arg marker "$RELEASE_MARKER" \
+            '.id == $id and .tag_name == $tag and .target_commitish == $sha and
+             .draft == true and .prerelease == false and
+             (.body | type == "string" and contains($marker))' \
+            "$response_file" > /dev/null
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+          printf 'release_action=%s\n' "$release_action" >> "$GITHUB_OUTPUT"
+
+      - name: Delete every old asset from the exact draft release ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.acquire_release.outputs.release_id }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_MARKER: '<!-- uruntime-ci-managed-release -->'
+        run: |
+          set -euo pipefail
+          [[ $RELEASE_ID =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release-before-delete.json
+          jq -e \
+            --argjson id "$RELEASE_ID" --arg tag "$RELEASE_TAG" --arg marker "$RELEASE_MARKER" \
+            '.id == $id and .tag_name == $tag and .draft == true and
+             (.body | type == "string" and contains($marker))' \
+            release-before-delete.json > /dev/null
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
+            > old-release-assets-pages.json
+          python3 - old-release-assets-pages.json old-release-asset-ids.txt <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              pages = json.load(source)
+          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+              raise SystemExit("invalid paginated asset-list response")
+          assets = [asset for page in pages for asset in page]
+          ids = []
+          for asset in assets:
+              asset_id = asset.get("id") if isinstance(asset, dict) else None
+              if isinstance(asset_id, bool) or not isinstance(asset_id, int) or asset_id <= 0:
+                  raise SystemExit("release asset has an invalid numeric ID")
+              ids.append(asset_id)
+          with open(sys.argv[2], "w", encoding="ascii") as output:
+              for asset_id in ids:
+                  print(asset_id, file=output)
+          PY
+          while IFS= read -r asset_id; do
+            [[ $asset_id =~ ^[0-9]+$ ]]
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+          done < old-release-asset-ids.txt
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
+            | jq -e 'all(.[]; length == 0)' > /dev/null
+
+      - name: Upload exactly 54 assets to the draft release ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.acquire_release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          [[ $RELEASE_ID =~ ^[0-9]+$ ]]
+          shopt -s nullglob
+          files=(release-dist/uruntime-*)
+          [[ ${#files[@]} -eq 54 ]]
+          for file in "${files[@]}"; do
+            [[ -f "$file" && ! -L "$file" ]]
+            name=${file##*/}
+            encoded_name=$(jq -rn --arg value "$name" '$value | @uri')
+            curl --fail-with-body --show-error --silent --location \
+              --request POST \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@$file" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$encoded_name" \
+              > /dev/null
+          done
+
+      - name: Verify the exact paginated asset manifest by release ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.acquire_release.outputs.release_id }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_MARKER: '<!-- uruntime-ci-managed-release -->'
+        run: |
+          set -euo pipefail
+          [[ $RELEASE_ID =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release-before-publish.json
+          jq -e \
+            --argjson id "$RELEASE_ID" --arg tag "$RELEASE_TAG" --arg marker "$RELEASE_MARKER" \
+            '.id == $id and .tag_name == $tag and .draft == true and
+             (.body | type == "string" and contains($marker))' \
+            release-before-publish.json > /dev/null
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
+            > release-assets-pages.json
+          python3 -c 'import json,sys; json.dump([a for p in json.load(open(sys.argv[1])) for a in p], open(sys.argv[2], "w"))' \
+            release-assets-pages.json release-assets.json
+          python3 scripts/ci_artifacts.py validate-release release-assets.json
+
+      - name: Re-verify the remote tag immediately before publishing
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          direct=''
+          peeled=''
+          while read -r sha ref; do
+            if [[ "$ref" == "refs/tags/$RELEASE_TAG" ]]; then
+              direct=$sha
+            elif [[ "$ref" == "refs/tags/$RELEASE_TAG^{}" ]]; then
+              peeled=$sha
+            fi
+          done < <(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+          remote_sha=${peeled:-$direct}
+          if [[ -z "$remote_sha" || "$remote_sha" != "$EXPECTED_SHA" ]]; then
+            printf 'remote tag %s resolves to %s, expected %s\n' \
+              "$RELEASE_TAG" "${remote_sha:-<missing>}" "$EXPECTED_SHA" >&2
+            exit 1
+          fi
+
+      - name: Publish only the verified exact-tag release ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.acquire_release.outputs.release_id }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+          RELEASE_BODY: Automated release of the validated uruntime artifacts.
+          RELEASE_MARKER: '<!-- uruntime-ci-managed-release -->'
+        run: |
+          set -euo pipefail
+          [[ $RELEASE_ID =~ ^[0-9]+$ ]]
+          release_body=$(printf '%s\n\n%s' "$RELEASE_BODY" "$RELEASE_MARKER")
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -f "tag_name=$RELEASE_TAG" \
+            -f "target_commitish=$EXPECTED_SHA" \
+            -f "name=$RELEASE_TAG" \
+            -f "body=$release_body" \
+            -F draft=false \
+            -F prerelease=false \
+            -F generate_release_notes=false \
+            -f make_latest=legacy > published-release.json
+          jq -e \
+            --argjson id "$RELEASE_ID" --arg tag "$RELEASE_TAG" \
+            --arg sha "$EXPECTED_SHA" --arg marker "$RELEASE_MARKER" \
+            '.id == $id and .tag_name == $tag and .target_commitish == $sha and
+             .draft == false and .prerelease == false and
+             (.body | type == "string" and contains($marker))' \
+            published-release.json > /dev/null
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > published-release-readback.json
+          jq -e \
+            --argjson id "$RELEASE_ID" --arg tag "$RELEASE_TAG" \
+            --arg sha "$EXPECTED_SHA" --arg marker "$RELEASE_MARKER" \
+            '.id == $id and .tag_name == $tag and .target_commitish == $sha and
+             .draft == false and .prerelease == false and
+             (.body | type == "string" and contains($marker))' \
+            published-release-readback.json > /dev/null

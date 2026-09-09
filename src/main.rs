@@ -1,27 +1,54 @@
 use std::{
-    thread::{sleep, spawn},
-    process::{exit, Command},
     env::{self, current_exe},
-    str, path::{PathBuf, Path},
-    time::{self, Duration, Instant},
+    fs::{
+        self, create_dir, create_dir_all, read_to_string, remove_dir, remove_dir_all, remove_file,
+        set_permissions, File, Metadata, Permissions,
+    },
     hash::{DefaultHasher, Hash, Hasher},
-    os::unix::{prelude::PermissionsExt, fs::{symlink, MetadataExt}, process::CommandExt},
-    io::{Error, ErrorKind::{NotFound, InvalidData, Other}, Read, Write, Result, Seek, SeekFrom},
-    fs::{self, File, Permissions, Metadata, create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, set_permissions, read_to_string},
+    io::{
+        Error,
+        ErrorKind::{InvalidData, NotFound, Other},
+        Read, Result, Seek, SeekFrom, Write,
+    },
+    os::unix::{
+        fs::{symlink, MetadataExt},
+        prelude::PermissionsExt,
+        process::CommandExt,
+    },
+    path::{Path, PathBuf},
+    process::{exit, Command},
+    str,
+    thread::{sleep, spawn},
+    time::{self, Duration, Instant},
 };
 
 use cfg_if::cfg_if;
-use which::which_all;
-use nix::fcntl::{open, OFlag};
-use xxhash_rust::xxh3::xxh3_64;
 use goblin::elf::{Elf, SectionHeader};
 use memfd_exec::{MemFdExecutable, Stdio};
-use nix::unistd::{access, fork, setsid, getcwd, close, AccessFlags, ForkResult, Pid};
-use signal_hook::{consts::{SIGINT, SIGTERM, SIGQUIT, SIGHUP, SIGUSR1, SIGUSR2}, iterator::Signals};
-use nix::{libc, sys::{wait::waitpid, stat::Mode, signal::{Signal, kill}}, mount::umount, errno::Errno};
+use nix::fcntl::{open, OFlag};
+use nix::unistd::{access, close, fork, getcwd, setsid, AccessFlags, ForkResult, Pid};
+use nix::{
+    errno::Errno,
+    libc,
+    mount::umount,
+    sys::{
+        signal::{kill, Signal},
+        stat::Mode,
+        wait::waitpid,
+    },
+};
+use signal_hook::{
+    consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2},
+    iterator::Signals,
+};
+use which::which_all;
+use xxhash_rust::xxh3::xxh3_64;
 
+mod elf_layout;
 
 const _LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
+const SECBIT_NOROOT: libc::c_ulong = 1;
+const SECBIT_NOROOT_LOCKED: libc::c_ulong = 2;
 const URUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const URUNTIME_MOUNT: &str = "URUNTIME_MOUNT=3";
@@ -68,6 +95,7 @@ struct CapHeader {
     pid: i32,
 }
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CapData {
     effective: u32,
     permitted: u32,
@@ -104,34 +132,28 @@ struct Embed {
 
 impl Embed {
     fn new() -> Self {
-        cfg_if! {
-            if #[cfg(feature = "upx")] {
-                Embed {
-                    #[cfg(feature = "squashfs")]
-                    squashfuse: include_bytes!("../assets/squashfuse-upx").to_vec(),
-                    #[cfg(feature = "squashfs")]
-                    unsquashfs: include_bytes!("../assets/unsquashfs-upx").to_vec(),
-                    #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
-                    mksquashfs: include_bytes!("../assets/mksquashfs-upx").to_vec(),
-                    #[cfg(all(feature = "lite", feature = "dwarfs"))]
-                    dwarfs_universal: include_bytes!("../assets/dwarfs-fuse-extract-upx").to_vec(),
-                    #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
-                    dwarfs_universal: include_bytes!("../assets/dwarfs-universal-upx").to_vec(),
-                }
-            } else {
-                Embed {
-                    #[cfg(feature = "squashfs")]
-                    squashfuse: include_bytes!("../assets/squashfuse-zst").to_vec(),
-                    #[cfg(feature = "squashfs")]
-                    unsquashfs: include_bytes!("../assets/unsquashfs-zst").to_vec(),
-                    #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
-                    mksquashfs: include_bytes!("../assets/mksquashfs-zst").to_vec(),
-                    #[cfg(all(feature = "lite", feature = "dwarfs"))]
-                    dwarfs_universal: include_bytes!("../assets/dwarfs-fuse-extract-zst").to_vec(),
-                    #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
-                    dwarfs_universal: include_bytes!("../assets/dwarfs-universal-zst").to_vec(),
-                }
-            }
+        Embed {
+            #[cfg(feature = "squashfs")]
+            squashfuse: include_bytes!(concat!(env!("URUNTIME_HELPER_DIR"), "/squashfuse-zst"))
+                .to_vec(),
+            #[cfg(feature = "squashfs")]
+            unsquashfs: include_bytes!(concat!(env!("URUNTIME_HELPER_DIR"), "/unsquashfs-zst"))
+                .to_vec(),
+            #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
+            mksquashfs: include_bytes!(concat!(env!("URUNTIME_HELPER_DIR"), "/mksquashfs-zst"))
+                .to_vec(),
+            #[cfg(all(feature = "lite", feature = "dwarfs"))]
+            dwarfs_universal: include_bytes!(concat!(
+                env!("URUNTIME_HELPER_DIR"),
+                "/dwarfs-fuse-extract-zst"
+            ))
+            .to_vec(),
+            #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
+            dwarfs_universal: include_bytes!(concat!(
+                env!("URUNTIME_HELPER_DIR"),
+                "/dwarfs-universal-zst"
+            ))
+            .to_vec(),
         }
     }
 
@@ -184,26 +206,30 @@ impl Embed {
 fn mfd_exec(exec_name: &str, exec_bytes: &[u8], exec_args: Vec<String>) {
     env::set_var("LC_ALL", "C");
     if get_env_var!("MALLOC_CONF").is_empty() {
-        env::set_var("MALLOC_CONF", "background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000")
+        env::set_var(
+            "MALLOC_CONF",
+            "background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000",
+        )
     }
 
-    #[cfg(not(feature = "upx"))]
     fn decompress(exec_name: &str, data: &[u8]) -> Vec<u8> {
         if exec_name != "uruntime" {
-            let mut decoder = zstd::stream::read::Decoder::new(data)
-            .unwrap_or_else(|err|{
+            let mut decoder = zstd::stream::read::Decoder::new(data).unwrap_or_else(|err| {
                 eprintln!("Failed to create decoder for decompress embed exe: {exec_name}: {err}");
                 exit(1)
             });
             let mut decompressed_data = Vec::new();
-            decoder.read_to_end(&mut decompressed_data).unwrap_or_else(|err|{
-                eprintln!("Failed to decompress embed exe: {exec_name}: {err}");
-                exit(1)
-            });
+            decoder
+                .read_to_end(&mut decompressed_data)
+                .unwrap_or_else(|err| {
+                    eprintln!("Failed to decompress embed exe: {exec_name}: {err}");
+                    exit(1)
+                });
             decompressed_data
-        } else { data.to_vec() }
+        } else {
+            data.to_vec()
+        }
     }
-    #[cfg(not(feature = "upx"))]
     let exec_bytes = &decompress(exec_name, exec_bytes);
 
     let err = MemFdExecutable::new(exec_name, exec_bytes)
@@ -223,7 +249,7 @@ fn get_image(path: &PathBuf, offset: u64) -> Result<Image> {
         path: path.to_path_buf(),
         offset,
         is_dwar: false,
-        is_squash: false
+        is_squash: false,
     };
     if bytes_read == 4 {
         let read_str = String::from_utf8_lossy(&buff);
@@ -234,7 +260,7 @@ fn get_image(path: &PathBuf, offset: u64) -> Result<Image> {
         }
     }
     if !image.is_squash && !image.is_dwar {
-        return Err(Error::new(NotFound, "SquashFS or DwarFS image not found!"))
+        return Err(Error::new(NotFound, "SquashFS or DwarFS image not found!"));
     }
     Ok(image)
 }
@@ -252,24 +278,214 @@ fn add_to_path(path: &PathBuf) {
 }
 
 fn restore_capabilities() {
-    let mut caps = CapHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
-    let mut cap_data = CapData { effective: 0, permitted: 0, inheritable: 0 };
-    if unsafe { libc::syscall(libc::SYS_capget, &mut caps, &mut cap_data) } == 0 {
-        let last_cap = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(39);
-        let all_caps = (1u64 << (last_cap + 1)) - 1;
-        cap_data.effective = all_caps as u32;
-        cap_data.permitted = all_caps as u32;
-        cap_data.inheritable = all_caps as u32;
-        unsafe { libc::syscall(libc::SYS_capset, &caps, &cap_data) };
+    let mut caps = CapHeader {
+        version: _LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let mut cap_data = [CapData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    if unsafe { libc::syscall(libc::SYS_capget, &mut caps, cap_data.as_mut_ptr()) } == 0 {
+        let last_cap = last_capability();
+        let all_caps = if last_cap == 63 {
+            u64::MAX
+        } else {
+            (1u64 << (last_cap + 1)) - 1
+        };
+        cap_data[0].effective = all_caps as u32;
+        cap_data[0].permitted = all_caps as u32;
+        cap_data[0].inheritable = all_caps as u32;
+        cap_data[1].effective = (all_caps >> 32) as u32;
+        cap_data[1].permitted = (all_caps >> 32) as u32;
+        cap_data[1].inheritable = (all_caps >> 32) as u32;
+        unsafe { libc::syscall(libc::SYS_capset, &caps, cap_data.as_ptr()) };
         for cap in 0..=last_cap {
             unsafe { libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_RAISE, cap, 0, 0) };
         }
     } else {
-        eprintln!("Warning: failed to get capabilities: {}", Error::last_os_error())
+        eprintln!(
+            "Warning: failed to get capabilities: {}",
+            Error::last_os_error()
+        )
     }
+}
+
+fn last_capability() -> u32 {
+    std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(39)
+        .min(63)
+}
+
+fn should_drop_capabilities(unshare_succeeded: bool, drop_caps: bool) -> bool {
+    unshare_succeeded && drop_caps
+}
+
+fn embedded_unshare_policy(mode: &str) -> (bool, bool, bool) {
+    match mode {
+        "=1" => (true, false, false),
+        "=2" => (true, true, false),
+        "=3" => (false, false, true),
+        _ => (false, false, false),
+    }
+}
+
+fn fallback_should_drop_capabilities(
+    fallback_unshare_succeeded: bool,
+    drop_caps_on_fallback: bool,
+) -> bool {
+    fallback_unshare_succeeded && drop_caps_on_fallback
+}
+
+fn environment_drop_caps_policy(value: &str) -> (bool, bool, bool) {
+    match value {
+        "1" => (true, false, false),
+        "2" => (true, true, false),
+        "3" => (false, false, true),
+        _ => (false, false, false),
+    }
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct UnshareCliOptions {
+    enable: bool,
+    root: bool,
+    uid: Option<String>,
+    gid: Option<String>,
+    drop_caps: bool,
+    drop_caps_on_fallback: bool,
+}
+
+fn parse_unshare_cli_options(
+    args: &mut Vec<String>,
+    prefix: &str,
+) -> std::result::Result<UnshareCliOptions, String> {
+    let base = format!("--{prefix}-unshare");
+    let mut options = UnshareCliOptions::default();
+    let mut retained = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            retained.extend(args[index..].iter().cloned());
+            break;
+        }
+        let value_option = if arg == &format!("{base}-uid") {
+            Some(("uid", args.get(index + 1).cloned(), true))
+        } else if let Some(value) = arg.strip_prefix(&format!("{base}-uid=")) {
+            Some(("uid", Some(value.to_string()), false))
+        } else if arg == &format!("{base}-gid") {
+            Some(("gid", args.get(index + 1).cloned(), true))
+        } else {
+            arg.strip_prefix(&format!("{base}-gid="))
+                .map(|value| ("gid", Some(value.to_string()), false))
+        };
+        if let Some((kind, value, consumes_next)) = value_option {
+            let value = value.ok_or_else(|| format!("{arg} requires a numeric value"))?;
+            value
+                .parse::<u32>()
+                .map_err(|_| format!("invalid {kind} value `{value}` for {arg}"))?;
+            if kind == "uid" {
+                options.uid = Some(value);
+            } else {
+                options.gid = Some(value);
+            }
+            options.enable = true;
+            index += 1 + usize::from(consumes_next);
+            continue;
+        }
+        if arg == &base {
+            options.enable = true;
+        } else if arg == &format!("{base}-root") {
+            options.enable = true;
+            options.root = true;
+        } else if arg == &format!("{base}-drop-caps") {
+            options.enable = true;
+            options.drop_caps = true;
+        } else if arg == &format!("{base}-fallback-drop-caps") {
+            options.drop_caps_on_fallback = true;
+        } else {
+            retained.push(arg.clone());
+        }
+        index += 1;
+    }
+    if options.drop_caps_on_fallback && options.enable {
+        options.drop_caps = true;
+        options.drop_caps_on_fallback = false;
+    }
+    *args = retained;
+    Ok(options)
+}
+
+fn remove_runtime_separator(args: &mut Vec<String>) {
+    if let Some(index) = args.iter().position(|arg| arg == "--") {
+        args.remove(index);
+    }
+}
+
+fn drop_capabilities(last_cap: u32) -> Result<()> {
+    let syscall_failed = |result: libc::c_long| {
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(Error::last_os_error())
+        }
+    };
+
+    let mut caps = CapHeader {
+        version: _LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let mut current = [CapData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    syscall_failed(unsafe { libc::syscall(libc::SYS_capget, &mut caps, current.as_mut_ptr()) })?;
+    let securebits = unsafe { libc::prctl(libc::PR_GET_SECUREBITS, 0, 0, 0, 0) };
+    let capabilities_are_empty = current
+        .iter()
+        .all(|data| data.effective == 0 && data.permitted == 0 && data.inheritable == 0);
+    if capabilities_are_empty
+        && securebits >= 0
+        && securebits as libc::c_ulong & (SECBIT_NOROOT | SECBIT_NOROOT_LOCKED)
+            == SECBIT_NOROOT | SECBIT_NOROOT_LOCKED
+    {
+        return Ok(());
+    }
+
+    syscall_failed(unsafe {
+        libc::prctl(
+            libc::PR_CAP_AMBIENT,
+            libc::PR_CAP_AMBIENT_CLEAR_ALL,
+            0,
+            0,
+            0,
+        ) as libc::c_long
+    })?;
+    syscall_failed(unsafe {
+        libc::prctl(
+            libc::PR_SET_SECUREBITS,
+            SECBIT_NOROOT | SECBIT_NOROOT_LOCKED,
+            0,
+            0,
+            0,
+        ) as libc::c_long
+    })?;
+    for cap in 0..=last_cap {
+        syscall_failed(unsafe {
+            libc::prctl(libc::PR_CAPBSET_DROP, cap, 0, 0, 0) as libc::c_long
+        })?;
+    }
+    let cap_data = [CapData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    syscall_failed(unsafe { libc::syscall(libc::SYS_capset, &caps, cap_data.as_ptr()) })
 }
 
 fn try_make_mount_private() -> bool {
@@ -279,7 +495,7 @@ fn try_make_mount_private() -> bool {
             c"/".as_ptr(),
             c"none".as_ptr(),
             libc::MS_REC | libc::MS_PRIVATE,
-            std::ptr::null()
+            std::ptr::null(),
         ) == 0
     }
 }
@@ -293,16 +509,23 @@ fn try_unshare(uid: u32, gid: u32, unshare_uid: &str, unshare_gid: &str) -> bool
         let _ = fs::write("/proc/self/setgroups", "deny");
         let uid_map = format!("{target_uid} {uid} 1");
         let gid_map = format!("{target_gid} {gid} 1");
-        if fs::write("/proc/self/uid_map", uid_map).is_ok() &&
-           fs::write("/proc/self/gid_map", gid_map).is_ok() {
+        if fs::write("/proc/self/uid_map", uid_map).is_ok()
+            && fs::write("/proc/self/gid_map", gid_map).is_ok()
+        {
             restore_capabilities();
             if !try_make_mount_private() {
-                eprintln!("Warning: failed to make mount private: {}", Error::last_os_error())
+                eprintln!(
+                    "Warning: failed to make mount private: {}",
+                    Error::last_os_error()
+                )
             }
-            return true
+            return true;
         }
     }
-    eprintln!("Failed to create user and mount namespaces: {}", Error::last_os_error());
+    eprintln!(
+        "Failed to create user and mount namespaces: {}",
+        Error::last_os_error()
+    );
     false
 }
 
@@ -312,19 +535,21 @@ fn is_in_user_and_mount_namespace() -> bool {
         Err(_) => return false,
     };
     let uid_map = uid_map.trim();
-    if uid_map.is_empty() || uid_map.split_whitespace().collect::<Vec<_>>() == vec!["0", "0", "4294967295"] {
-        return false
+    if uid_map.is_empty()
+        || uid_map.split_whitespace().collect::<Vec<_>>() == vec!["0", "0", "4294967295"]
+    {
+        return false;
     }
     let lines: Vec<&str> = uid_map.lines().collect();
     if lines.is_empty() {
-        return false
+        return false;
     }
     for line in lines {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() == 3 {
             if let Ok(count) = parts[2].parse::<u32>() {
                 if count < 4294967295 {
-                    return try_make_mount_private()
+                    return try_make_mount_private();
                 }
             }
         }
@@ -332,28 +557,61 @@ fn is_in_user_and_mount_namespace() -> bool {
     false
 }
 
+fn namespace_diff_flags(pid: Pid) -> Result<i32> {
+    let mut flags = 0;
+    for (namespace, flag) in [("user", libc::CLONE_NEWUSER), ("mnt", libc::CLONE_NEWNS)] {
+        let current = fs::read_link(format!("/proc/self/ns/{namespace}"))?;
+        let target = fs::read_link(format!("/proc/{pid}/ns/{namespace}"))?;
+        if current != target {
+            flags |= flag
+        }
+    }
+    Ok(flags)
+}
+
 fn try_setns(pid: Pid) -> bool {
+    let flags = match namespace_diff_flags(pid) {
+        Ok(0) => return true,
+        Ok(flags) => flags,
+        Err(err) => {
+            eprintln!("Failed to compare namespaces: {err}");
+            return false;
+        }
+    };
     let original_cwd = getcwd().ok();
     let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.as_raw() as i64, 0i64) as i32 };
     if pidfd >= 0 {
-        let result = unsafe { libc::setns(pidfd, libc::CLONE_NEWNS | libc::CLONE_NEWUSER) };
+        let result = unsafe { libc::setns(pidfd, flags) };
         let _ = close(pidfd);
         if result == 0 {
-            restore_capabilities();
-            if !try_make_mount_private() {
-                eprintln!("Warning: failed to make mount private: {}", Error::last_os_error())
+            if flags & libc::CLONE_NEWUSER != 0 {
+                restore_capabilities()
             }
-            if let Some(cwd) = original_cwd {
-                if let Err(err) = env::set_current_dir(&cwd) {
-                    eprintln!("Warning: failed to restore working directory: {err}");
+            if flags & libc::CLONE_NEWNS != 0 {
+                if !try_make_mount_private() {
+                    eprintln!(
+                        "Warning: failed to make mount private: {}",
+                        Error::last_os_error()
+                    )
+                }
+                if let Some(cwd) = original_cwd {
+                    if let Err(err) = env::set_current_dir(&cwd) {
+                        eprintln!("Warning: failed to restore working directory: {err}");
+                    }
                 }
             }
-            return true
+            return true;
         }
-        eprintln!("Failed to enter namespaces via pidfd: {}", Error::last_os_error());
-        return false
+        eprintln!(
+            "Failed to enter namespaces via pidfd: {}",
+            Error::last_os_error()
+        );
+        return false;
     }
-    eprintln!("Failed to open pidfd: {} - mount point reuse unavailable", Error::last_os_error());
+    eprintln!(
+        "Failed to open pidfd: {} - mount point reuse unavailable",
+        Error::last_os_error()
+    );
     false
 }
 
@@ -379,42 +637,60 @@ fn try_reuse_unshare_mount_point(mount_point: &Path) -> Option<Pid> {
     if !is_pid_exists(pid) {
         let un_pid_file = mount_point.with_extension("un.pid");
         let _ = remove_file(&un_pid_file);
-        return None
+        return None;
     }
-    if try_setns(pid)
-        && is_mounted(mount_point).unwrap_or(false) {
-        return Some(pid)
+    if is_mounted(mount_point).unwrap_or(false) {
+        return Some(pid);
+    }
+    if try_setns(pid) && is_mounted(mount_point).unwrap_or(false) {
+        return Some(pid);
     }
     None
 }
 
 fn check_fuse(
     uruntime: &Path,
-    uid: u32, gid: u32,
-    unshare_uid: &str, unshare_gid: &str,
-    unshare_succeeded: &mut bool, is_unshare: &mut bool
+    uid: u32,
+    gid: u32,
+    unshare_uid: &str,
+    unshare_gid: &str,
+    unshare_succeeded: &mut bool,
+    is_unshare: &mut bool,
 ) -> bool {
-    if access("/dev/fuse", AccessFlags::R_OK).is_err() ||
-       access("/dev/fuse", AccessFlags::W_OK).is_err() {
-        return false
+    if access("/dev/fuse", AccessFlags::R_OK).is_err()
+        || access("/dev/fuse", AccessFlags::W_OK).is_err()
+    {
+        return false;
     }
-    if uid == 0 || *unshare_succeeded || is_in_user_and_mount_namespace() { return true }
+    if uid == 0 || *unshare_succeeded || is_in_user_and_mount_namespace() {
+        return true;
+    }
     fn create_fusermount_dir(tmp_path_dir: &PathBuf) -> bool {
         if !tmp_path_dir.is_dir() {
             if let Err(err) = create_dir_all(tmp_path_dir) {
-                eprintln!("Failed to create fusermount PATH dir: {err}: {:?}", tmp_path_dir);
-                return false
+                eprintln!(
+                    "Failed to create fusermount PATH dir: {err}: {:?}",
+                    tmp_path_dir
+                );
+                return false;
             }
             add_to_path(tmp_path_dir);
         }
         true
     }
-    fn create_fusermount_symlink(tmp_path_dir: &Path, fusermount_path: &str, fusermount_name: &str) -> bool {
+    fn create_fusermount_symlink(
+        tmp_path_dir: &Path,
+        fusermount_path: &str,
+        fusermount_name: &str,
+    ) -> bool {
         let fsmntlink_path = tmp_path_dir.join(fusermount_name);
         let _ = remove_file(&fsmntlink_path);
         if let Err(err) = symlink(fusermount_path, &fsmntlink_path) {
-            eprintln!("Failed to create fusermount symlink: {err}: {:?}", fsmntlink_path);
-            return false
+            eprintln!(
+                "Failed to create fusermount symlink: {err}: {:?}",
+                fsmntlink_path
+            );
+            return false;
         }
         true
     }
@@ -428,11 +704,11 @@ fn check_fuse(
             if old_symlink.exists() {
                 if let Ok(canonical_path) = old_symlink.canonicalize() {
                     if is_suid_exe(&canonical_path).unwrap_or(false) {
-                        continue
+                        continue;
                     }
                     if let Some(ref uruntime_canonical) = uruntime_path {
                         if canonical_path == *uruntime_canonical {
-                            continue
+                            continue;
                         }
                     }
                 }
@@ -443,19 +719,34 @@ fn check_fuse(
     }
     let fusermount_prog = &get_env_var!("FUSERMOUNT_PROG");
     if is_suid_exe(&PathBuf::from(fusermount_prog)).unwrap_or(false) {
-        if !create_fusermount_dir(tmp_path_dir) { exit(1) }
-        if !create_fusermount_symlink(tmp_path_dir, fusermount_prog, &basename(fusermount_prog)) { exit(1) }
+        if !create_fusermount_dir(tmp_path_dir) {
+            exit(1)
+        }
+        if !create_fusermount_symlink(tmp_path_dir, fusermount_prog, &basename(fusermount_prog)) {
+            exit(1)
+        }
     } else {
         for fusermount in fusermount_list {
             if find_suid_exe(fusermount).is_some() {
-                continue
+                continue;
             }
-            let fallback: &str = if fusermount.ends_with("3")
-                { "fusermount" } else { "fusermount3" };
+            let fallback: &str = if fusermount.ends_with("3") {
+                "fusermount"
+            } else {
+                "fusermount3"
+            };
             if let Some(fusermount_path) = find_suid_exe(fallback) {
-                if !create_fusermount_dir(tmp_path_dir) { break }
-                if !create_fusermount_symlink(tmp_path_dir, &fusermount_path.to_string_lossy(), fusermount) { break }
-                break
+                if !create_fusermount_dir(tmp_path_dir) {
+                    break;
+                }
+                if !create_fusermount_symlink(
+                    tmp_path_dir,
+                    &fusermount_path.to_string_lossy(),
+                    fusermount,
+                ) {
+                    break;
+                }
+                break;
             }
             is_fusermount = false
         }
@@ -465,11 +756,15 @@ fn check_fuse(
         *is_unshare = true;
         if try_unshare(uid, gid, unshare_uid, unshare_gid) {
             *unshare_succeeded = true;
-            return true
+            return true;
         }
         for fusermount in fusermount_list {
-            if !create_fusermount_dir(tmp_path_dir) { break }
-            if !create_fusermount_symlink(tmp_path_dir, &uruntime.to_string_lossy(), fusermount) { break }
+            if !create_fusermount_dir(tmp_path_dir) {
+                break;
+            }
+            if !create_fusermount_symlink(tmp_path_dir, &uruntime.to_string_lossy(), fusermount) {
+                break;
+            }
         }
     }
     true
@@ -482,54 +777,66 @@ macro_rules! check_extract {
         $self_exe:expr,
         $true_block:block
     ) => {
-        eprintln!("{}: failed to utilize FUSE during startup!", basename($self_exe.to_str().unwrap_or_default()));
+        eprintln!(
+            "{}: failed to utilize FUSE during startup!",
+            basename($self_exe.to_str().unwrap_or_default())
+        );
         let self_size = get_file_size($self_exe).unwrap_or_else(|err| {
             eprintln!("Failed to get self size: {err}");
             exit(1)
         });
-        if !$is_mount_only && ($uruntime_extract == 2 || ($uruntime_extract == 3 &&
-            self_size <= MAX_EXTRACT_SELF_SIZE)) {
+        if !$is_mount_only
+            && ($uruntime_extract == 2
+                || ($uruntime_extract == 3 && self_size <= MAX_EXTRACT_SELF_SIZE))
+        {
             $true_block
         } else {
             eprintln!(
-"Cannot mount {SELF_NAME}, please check your FUSE setup.
+                "Cannot mount {SELF_NAME}, please check your FUSE setup.
 You might still be able to extract the contents of this {SELF_NAME}
 if you run it with the --{ARG_PFX}-extract option
 See https://github.com/AppImage/AppImageKit/wiki/FUSE
-and run it with the --{ARG_PFX}-help option for more information");
+and run it with the --{ARG_PFX}-help option for more information"
+            );
             exit(1)
         }
     };
 }
 
 fn get_section_index(elf: &Elf<'_>, section_name: &str) -> Result<usize> {
-    let section_index = elf.section_headers
+    let section_index = elf
+        .section_headers
         .iter()
         .position(|sh| {
-            if let Some(name) = elf.shdr_strtab.get_at(sh.sh_name)
-                { name == section_name } else { false }
+            if let Some(name) = elf.shdr_strtab.get_at(sh.sh_name) {
+                name == section_name
+            } else {
+                false
+            }
         })
-        .ok_or(Error::new(InvalidData,
-            format!("Section header with name '{section_name}' not found!")
+        .ok_or(Error::new(
+            InvalidData,
+            format!("Section header with name '{section_name}' not found!"),
         ))?;
     Ok(section_index)
 }
 
 fn get_section_header(headers_bytes: &[u8], section_name: &str) -> Result<SectionHeader> {
-    let elf = Elf::parse(headers_bytes)
-        .map_err(|err| Error::new(InvalidData, err))?;
+    let elf = Elf::parse(headers_bytes).map_err(|err| Error::new(InvalidData, err))?;
     let section_index = get_section_index(&elf, section_name)?;
     Ok(elf.section_headers[section_index].clone())
 }
 
 fn get_section_data(headers_bytes: &[u8], section_name: &str) -> Result<String> {
     let section = &mut get_section_header(headers_bytes, section_name)?;
-    let section_data = &headers_bytes[section.sh_offset as usize..(section.sh_offset + section.sh_size) as usize];
+    let section_data =
+        &headers_bytes[section.sh_offset as usize..(section.sh_offset + section.sh_size) as usize];
     if let Ok(data_str) = str::from_utf8(section_data) {
         Ok(data_str.trim().trim_matches('\0').into())
     } else {
-        Err(Error::new(InvalidData,
-            format!("Section data is not valid UTF-8: {section_name}")
+        Err(Error::new(
+            InvalidData,
+            format!("Section data is not valid UTF-8: {section_name}"),
         ))
     }
 }
@@ -550,16 +857,17 @@ fn add_section_data(runtime: &Runtime, section_name: &str, exec_args: &[String])
         } else {
             section_data.as_bytes()
         }
-    } else { &[] };
+    } else {
+        &[]
+    };
     let new_size = string_bytes.len() as u64;
     if new_size > original_size {
-        return Err(Error::new(InvalidData,
-            "New section header data is larger than the section size!"
+        return Err(Error::new(
+            InvalidData,
+            "New section header data is larger than the section size!",
         ));
     }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .open(&runtime.path)?;
+    let mut file = fs::OpenOptions::new().write(true).open(&runtime.path)?;
     file.seek(SeekFrom::Start(offset))?;
     file.write_all(string_bytes)?;
     if new_size < original_size {
@@ -572,40 +880,35 @@ fn add_section_data(runtime: &Runtime, section_name: &str, exec_args: &[String])
 
 fn get_runtime(path: &PathBuf) -> Result<Runtime> {
     let mut file = File::open(path)?;
-    let mut elf_header_raw = [0; 64];
-    file.read_exact(&mut elf_header_raw)?;
-    let section_table_offset = u64::from_le_bytes(elf_header_raw[40..48].try_into().unwrap_or_default()); // e_shoff
-    let section_count = u16::from_le_bytes(elf_header_raw[60..62].try_into().unwrap_or_default()); // e_shnum
-    let section_table_size = section_count as u64 * 64;
-    let required_bytes = section_table_offset + section_table_size;
-    let mut headers_bytes = vec![0; required_bytes as usize];
-    file.seek(SeekFrom::Start(0))?;
-    file.read_exact(&mut headers_bytes)?;
-    let elf = Elf::parse(&headers_bytes)
-        .map_err(|err| Error::new(InvalidData, err))?;
-    let section_table_end =
-        elf.header.e_shoff + (elf.header.e_shentsize as u64 * elf.header.e_shnum as u64);
-    let last_section_end = elf
-        .section_headers
-        .last()
-        .map(|section| section.sh_offset + section.sh_size)
-        .unwrap_or(0);
+    let file_len = file.metadata()?.len();
+    let prefix = elf_layout::read_elf_prefix(&mut file, file_len)?;
+    let headers_bytes = prefix.bytes;
+    let elf = Elf::parse(&headers_bytes).map_err(|err| Error::new(InvalidData, err))?;
     let envs = if let Ok(section_index) = get_section_index(&elf, ".envs") {
         let section = &elf.section_headers[section_index];
-        let section_data = &headers_bytes[section.sh_offset as usize..(section.sh_offset + section.sh_size) as usize];
-        str::from_utf8(section_data).unwrap_or_default().trim_matches('\0').to_string()
-    } else { "".into() };
+        let section_data = &headers_bytes
+            [section.sh_offset as usize..(section.sh_offset + section.sh_size) as usize];
+        str::from_utf8(section_data)
+            .unwrap_or_default()
+            .trim_matches('\0')
+            .to_string()
+    } else {
+        "".into()
+    };
     Ok(Runtime {
         path: path.to_path_buf(),
         headers_bytes,
-        size: section_table_end.max(last_section_end),
+        size: prefix.boundary,
         envs,
     })
 }
 
 fn random_string(length: usize) -> String {
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let mut rng = time::SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let mut result = String::with_capacity(length);
     for _ in 0..length {
         rng = rng.wrapping_mul(48271).wrapping_rem(0x7FFFFFFF);
@@ -630,7 +933,7 @@ fn get_metadata_or_broken_mount(path: &Path) -> Result<Metadata> {
         Err(err) => {
             if let Some(errno) = Errno::from_raw(err.raw_os_error().unwrap_or(0)).into() {
                 if is_broken_mount_errno(errno) {
-                    return Err(Error::new(Other, "broken mount point"))
+                    return Err(Error::new(Other, "broken mount point"));
                 }
             }
             Err(err)
@@ -655,7 +958,7 @@ fn is_mount_point(path: &Path) -> Result<bool> {
             };
             Ok(device_id != parent_metadata.dev())
         }
-        None => Ok(false)
+        None => Ok(false),
     }
 }
 
@@ -663,14 +966,20 @@ fn is_mounted(path: &Path) -> Result<bool> {
     let is_mount = is_mount_point(path)?;
     if is_mount {
         let path = &path.canonicalize().unwrap_or(path.into());
-        match open(path, OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC, Mode::empty()) {
-            Ok(fd) => { let _ = close(fd); }
+        match open(
+            path,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => {
+                let _ = close(fd);
+            }
             Err(err) => {
                 if is_broken_mount_errno(err) {
                     try_unmount(None, path);
-                    return Ok(false)
+                    return Ok(false);
                 }
-                return Err(Error::from(err))
+                return Err(Error::from(err));
             }
         }
     }
@@ -692,7 +1001,7 @@ fn find_suid_exe(name: &str) -> Option<PathBuf> {
     for path in which_all(name).ok()? {
         let canonical_path = path.canonicalize().unwrap_or(path);
         if is_suid_exe(&canonical_path).unwrap_or(false) {
-            return Some(canonical_path)
+            return Some(canonical_path);
         }
     }
     None
@@ -702,7 +1011,7 @@ fn is_dir_inuse(mount_point: &PathBuf) -> Result<bool> {
     for entry in fs::read_dir("/proc")? {
         if let Ok(target) = fs::read_link(entry?.path().join("exe")) {
             if target.starts_with(mount_point) {
-                return Ok(true)
+                return Ok(true);
             }
         }
     }
@@ -713,7 +1022,8 @@ fn wait_dir_notuse(
     mount_point: &PathBuf,
     timeout: Option<Duration>,
     delay: Option<Duration>,
-    delay_check: bool) -> bool {
+    delay_check: bool,
+) -> bool {
     let start_time = Instant::now();
     let default_delay = Duration::from_millis(100);
     let delay = delay.unwrap_or(default_delay);
@@ -721,17 +1031,22 @@ fn wait_dir_notuse(
         if delay_check {
             sleep(delay);
             for num_check in 1..=5 {
-                if is_dir_inuse(mount_point).unwrap_or(false)
-                { break } else { sleep(default_delay * 2) }
-                if num_check == 5 { return true }
+                if is_dir_inuse(mount_point).unwrap_or(false) {
+                    break;
+                } else {
+                    sleep(default_delay * 2)
+                }
+                if num_check == 5 {
+                    return true;
+                }
             }
         } else {
             if !is_dir_inuse(mount_point).unwrap_or(false) {
-                return true
+                return true;
             }
             if let Some(timeout) = timeout {
                 if start_time.elapsed() >= timeout {
-                    return false
+                    return false;
                 }
             }
         }
@@ -740,10 +1055,7 @@ fn wait_dir_notuse(
 }
 
 fn is_pid_exists(pid: Pid) -> bool {
-    if PathBuf::from(format!("/proc/{pid}")).exists() {
-        return true
-    }
-    false
+    PathBuf::from(format!("/proc/{pid}")).exists()
 }
 
 fn wait_pid_exit(pid: Pid, timeout: Option<Duration>) -> bool {
@@ -751,7 +1063,7 @@ fn wait_pid_exit(pid: Pid, timeout: Option<Duration>) -> bool {
     while is_pid_exists(pid) {
         if let Some(timeout) = timeout {
             if start_time.elapsed() >= timeout {
-                return false
+                return false;
             }
         }
         sleep(Duration::from_millis(10))
@@ -762,18 +1074,21 @@ fn wait_pid_exit(pid: Pid, timeout: Option<Duration>) -> bool {
 fn try_unmount(fuse_pid: Option<Pid>, mount_point: &Path) -> bool {
     if let Some(fuse_pid) = fuse_pid {
         sleep(Duration::from_millis(100));
-        if !is_pid_exists(fuse_pid) { return false }
+        if !is_pid_exists(fuse_pid) {
+            return false;
+        }
     }
     if !is_mount_point(mount_point).unwrap_or(false) {
         eprintln!("{:?}: not mounted!", mount_point);
-        return false
+        return false;
     }
 
     let mut is_busy = false;
 
     let res = umount(mount_point);
-    if res.is_ok() { return true }
-    else if let Err(err) = res {
+    if res.is_ok() {
+        return true;
+    } else if let Err(err) = res {
         if err == nix::Error::from(Errno::EBUSY) {
             is_busy = true
         }
@@ -784,35 +1099,54 @@ fn try_unmount(fuse_pid: Option<Pid>, mount_point: &Path) -> bool {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stdout.is_empty() { println!("{stdout}") }
-                if !stderr.is_empty() { eprintln!("{stderr}") }
+                if !stdout.is_empty() {
+                    println!("{stdout}")
+                }
+                if !stderr.is_empty() {
+                    eprintln!("{stderr}")
+                }
                 return (
                     output.status.success(),
-                    stderr.to_ascii_lowercase().contains("busy") || stdout.to_ascii_lowercase().contains("busy")
-                )
+                    stderr.to_ascii_lowercase().contains("busy")
+                        || stdout.to_ascii_lowercase().contains("busy"),
+                );
             }
-            Err(err) => { eprintln!("Failed to execute {cmd}: {err}") }
+            Err(err) => {
+                eprintln!("Failed to execute {cmd}: {err}")
+            }
         }
         (false, false)
     }
 
     let args = vec![mount_point.to_str().unwrap_or_default()];
-    let mut fusermount_args= args.clone();
+    let mut fusermount_args = args.clone();
     fusermount_args.insert(0, "-u");
 
     for fusermount in &["fusermount", "fusermount3"] {
-        if is_busy { break }
+        if is_busy {
+            break;
+        }
         let (success, busy) = handle_command(fusermount, &fusermount_args);
-        if success { return true } else if busy { is_busy = true }
+        if success {
+            return true;
+        } else if busy {
+            is_busy = true
+        }
     }
 
     if !is_busy {
         let (success, busy) = handle_command("umount", &args);
-        if success { return true } else if busy { is_busy = true }
+        if success {
+            return true;
+        } else if busy {
+            is_busy = true
+        }
     }
 
     if let Some(fuse_pid) = fuse_pid {
-        if !is_busy && kill(fuse_pid, Signal::SIGTERM).is_ok() { return true }
+        if !is_busy && kill(fuse_pid, Signal::SIGTERM).is_ok() {
+            return true;
+        }
     }
 
     eprintln!("Failed to unmount: {:?}", mount_point);
@@ -824,14 +1158,14 @@ fn try_unmount(fuse_pid: Option<Pid>, mount_point: &Path) -> bool {
 
 fn wait_mount(pid: Pid, path: &PathBuf, timeout: Duration) -> bool {
     let start_time = Instant::now();
-    spawn(move || waitpid(pid, None) );
+    spawn(move || waitpid(pid, None));
     while !is_mounted(path).unwrap_or(false) {
         if !is_pid_exists(pid) {
             eprintln!("The mount process ended unexpectedly! PID: {pid}");
-            return false
+            return false;
         } else if start_time.elapsed() >= timeout {
             eprintln!("Timeout reached while waiting for mount: {:?}", path);
-            return false
+            return false;
         }
         sleep(Duration::from_millis(2))
     }
@@ -845,24 +1179,30 @@ fn try_setsid() {
     }
 }
 
-fn remove_tmp_dirs(dirs: Vec<&PathBuf>, unshare_succeeded: bool) {
+fn remove_tmp_dirs(dirs: &[PathBuf], unshare_succeeded: bool) {
     if let Some(dir) = dirs.first() {
         if !is_mounted(dir).unwrap_or(false) {
             let pidfile_ext = if !unshare_succeeded { "pid" } else { "un.pid" };
             let pid_file = dir.with_extension(pidfile_ext);
-            if pid_file.is_file() { let _ = remove_file(&pid_file); }
+            if pid_file.is_file() {
+                let _ = remove_file(&pid_file);
+            }
         }
     }
-    for dir in dirs { let _ = remove_dir(dir); }
+    for dir in dirs {
+        let _ = remove_dir(dir);
+    }
 }
 
-fn create_tmp_dirs(dirs: Vec<&PathBuf>) -> Result<()> {
+fn create_tmp_dirs(dirs: &[PathBuf]) -> Result<()> {
     if let Some(dir) = dirs.first() {
         create_dir_all(dir)?;
         for dir in dirs {
             if let Err(err) = set_permissions(dir, Permissions::from_mode(0o700)) {
                 if let Some(os_error) = err.raw_os_error() {
-                    if os_error != 30 { return Err(err) }
+                    if os_error != 30 {
+                        return Err(err);
+                    }
                 }
             }
         }
@@ -884,32 +1224,41 @@ fn get_dwfs_option(option: &str, default: &str) -> String {
 
 #[cfg(feature = "dwarfs")]
 fn get_dwfs_cachesize() -> String {
-    get_dwfs_option("DWARFS_CACHESIZE",
-    &if let Ok(meminfo) = <procfs::Meminfo as procfs::Current>::current() {
-        let available_memory = meminfo.mem_available.unwrap_or(meminfo.mem_free) as f64;
-        let available_memory_mb = available_memory / 1024.0 / 1024.0 / 1.3;
-        let cache_sizes_mb: [u32; 10] = [1536, 1024, 896, 768, 640, 512, 384, 256, 128, 64];
-        let cache_size_mb = cache_sizes_mb
-            .iter()
-            .find(|threshold| available_memory_mb > (**threshold as f64)).copied()
-            .unwrap_or(32);
-        format!("{}M", cache_size_mb)
-    } else {
-        DWARFS_CACHESIZE.into()
-    })
+    get_dwfs_option(
+        "DWARFS_CACHESIZE",
+        &if let Ok(meminfo) = <procfs::Meminfo as procfs::Current>::current() {
+            let available_memory = meminfo.mem_available.unwrap_or(meminfo.mem_free) as f64;
+            let available_memory_mb = available_memory / 1024.0 / 1024.0 / 1.3;
+            let cache_sizes_mb: [u32; 10] = [1536, 1024, 896, 768, 640, 512, 384, 256, 128, 64];
+            let cache_size_mb = cache_sizes_mb
+                .iter()
+                .find(|threshold| available_memory_mb > (**threshold as f64))
+                .copied()
+                .unwrap_or(32);
+            format!("{}M", cache_size_mb)
+        } else {
+            DWARFS_CACHESIZE.into()
+        },
+    )
 }
 
 #[cfg(feature = "dwarfs")]
 fn get_dwfs_workers(cachesize: &str, cpus: usize) -> String {
-    get_dwfs_option("DWARFS_WORKERS", &match cachesize {
-        "1536M"|"1024M" => { cpus }
-        "896M" => { 2 }
-        _ => { 1 }
-    }.to_string())
+    get_dwfs_option(
+        "DWARFS_WORKERS",
+        &match cachesize {
+            "1536M" | "1024M" => cpus,
+            "896M" => 2,
+            _ => 1,
+        }
+        .to_string(),
+    )
 }
 
 fn mount_image(embed: &Embed, image: &Image, mount_dir: PathBuf, uid: u32, gid: u32) {
-    if is_mounted(&mount_dir).unwrap_or(false) { return }
+    if is_mounted(&mount_dir).unwrap_or(false) {
+        return;
+    }
     let mount_dir = mount_dir.to_str().unwrap_or_default().to_string();
     let image_path = image.path.to_str().unwrap_or_default().to_string();
     if image.is_dwar {
@@ -919,16 +1268,42 @@ fn mount_image(embed: &Embed, image: &Image, mount_dir: PathBuf, uid: u32, gid: 
             let cachesize = get_dwfs_cachesize();
             let workers = get_dwfs_workers(&cachesize, cpus);
             let mut exec_args = vec![
-                image_path, mount_dir, "-f".into(),
-                "-o".into(), format!("uid={uid},gid={gid}"),
-                "-o".into(), format!("offset={},cachesize={cachesize},workers={workers}", image.offset),
-                "-o".into(), "ro,nodev,tidy_strategy=time,seq_detector=1,cache_files".into(),
-                "-o".into(), format!("blocksize={}", get_dwfs_option("DWARFS_BLOCKSIZE", DWARFS_BLOCKSIZE)),
-                "-o".into(), format!("readahead={}", get_dwfs_option("DWARFS_READAHEAD", DWARFS_READAHEAD)),
+                image_path,
+                mount_dir,
+                "-f".into(),
+                "-o".into(),
+                format!("uid={uid},gid={gid}"),
+                "-o".into(),
+                format!(
+                    "offset={},cachesize={cachesize},workers={workers}",
+                    image.offset
+                ),
+                "-o".into(),
+                "ro,nodev,tidy_strategy=time,seq_detector=1,cache_files".into(),
+                "-o".into(),
+                format!(
+                    "blocksize={}",
+                    get_dwfs_option("DWARFS_BLOCKSIZE", DWARFS_BLOCKSIZE)
+                ),
+                "-o".into(),
+                format!(
+                    "readahead={}",
+                    get_dwfs_option("DWARFS_READAHEAD", DWARFS_READAHEAD)
+                ),
             ];
             match cachesize.as_str() {
-                "1536M"|"1024M" => { exec_args.append(&mut vec!["-o".into(), "clone_fd,tidy_interval=2s,tidy_max_age=10s".into()]); }
-                _ => { exec_args.append(&mut vec!["-o".into(), "tidy_interval=500ms,tidy_max_age=1s".into()]); }
+                "1536M" | "1024M" => {
+                    exec_args.append(&mut vec![
+                        "-o".into(),
+                        "clone_fd,tidy_interval=2s,tidy_max_age=10s".into(),
+                    ]);
+                }
+                _ => {
+                    exec_args.append(&mut vec![
+                        "-o".into(),
+                        "tidy_interval=500ms,tidy_max_age=1s".into(),
+                    ]);
+                }
             }
             if get_env_var!("ENABLE_FUSE_DEBUG") == "1" {
                 exec_args.append(&mut vec!["-o".into(), "debuglevel=debug".into()]);
@@ -942,7 +1317,10 @@ fn mount_image(embed: &Embed, image: &Image, mount_dir: PathBuf, uid: u32, gid: 
             }
             let dwarfs_analysis_file = get_env_var!("DWARFS_ANALYSIS_FILE");
             if !dwarfs_analysis_file.is_empty() {
-                exec_args.append(&mut vec!["-o".into(), format!("analysis_file={dwarfs_analysis_file}")]);
+                exec_args.append(&mut vec![
+                    "-o".into(),
+                    format!("analysis_file={dwarfs_analysis_file}"),
+                ]);
             }
             if get_env_var!("DWARFS_USE_MMAP") == "1" {
                 exec_args.append(&mut vec!["-o".into(), "block_allocator=mmap".into()]);
@@ -955,10 +1333,15 @@ fn mount_image(embed: &Embed, image: &Image, mount_dir: PathBuf, uid: u32, gid: 
         #[cfg(feature = "squashfs")]
         {
             let mut exec_args = vec![
-                image_path, mount_dir, "-f".into(),
-                "-o".into(), "ro,nodev".into(),
-                "-o".into(), format!("uid={uid},gid={gid}"),
-                "-o".into(), format!("offset={}", image.offset)
+                image_path,
+                mount_dir,
+                "-f".into(),
+                "-o".into(),
+                "ro,nodev".into(),
+                "-o".into(),
+                format!("uid={uid},gid={gid}"),
+                "-o".into(),
+                format!("offset={}", image.offset),
             ];
             if get_env_var!("ENABLE_FUSE_DEBUG") == "1" {
                 exec_args.append(&mut vec!["-o".into(), "debug".into()]);
@@ -968,11 +1351,17 @@ fn mount_image(embed: &Embed, image: &Image, mount_dir: PathBuf, uid: u32, gid: 
     }
 }
 
-fn extract_image(embed: &Embed, image: &Image, mut extract_dir: PathBuf, is_extract_run: bool, pattern: Option<&String>) {
+fn extract_image(
+    embed: &Embed,
+    image: &Image,
+    mut extract_dir: PathBuf,
+    is_extract_run: bool,
+    pattern: Option<&String>,
+) {
     if is_extract_run {
         if let Ok(dir) = extract_dir.read_dir() {
-            if dir.flatten().any(|entry|entry.path().exists()) {
-                return
+            if dir.flatten().any(|entry| entry.path().exists()) {
+                return;
             }
         }
     }
@@ -1009,13 +1398,18 @@ fn extract_image(embed: &Embed, image: &Image, mut extract_dir: PathBuf, is_extr
         {
             let cachesize = get_dwfs_cachesize();
             let mut exec_args = vec![
-                "--input".into(), image_path,
+                "--input".into(),
+                image_path,
                 "--log-level=error".into(),
                 format!("--cache-size={cachesize}"),
                 format!("--image-offset={}", image.offset),
-                format!("--num-workers={}", get_dwfs_workers(&cachesize, num_cpus::get())),
-                "--output".into(), extract_dir,
-                "--stdout-progress".into()
+                format!(
+                    "--num-workers={}",
+                    get_dwfs_workers(&cachesize, num_cpus::get())
+                ),
+                "--output".into(),
+                extract_dir,
+                "--stdout-progress".into(),
             ];
             if let Some(pattern) = pattern {
                 exec_args.append(&mut vec!["--pattern".into(), pattern.to_string()]);
@@ -1025,10 +1419,13 @@ fn extract_image(embed: &Embed, image: &Image, mut extract_dir: PathBuf, is_extr
     } else {
         #[cfg(feature = "squashfs")]
         {
-            let mut exec_args = vec!["-f".into(),
-                "-d".into(), extract_dir,
-                "-o".into(), image.offset.to_string(),
-                image_path
+            let mut exec_args = vec![
+                "-f".into(),
+                "-d".into(),
+                extract_dir,
+                "-o".into(),
+                image.offset.to_string(),
+                image_path,
             ];
             if let Some(pattern) = pattern {
                 exec_args.push(pattern.into())
@@ -1057,7 +1454,9 @@ fn try_set_portable_dir(dir: &PathBuf, env_var: &str, default_path: Option<&str>
 }
 
 fn parse_reuse_check_delay(delay: &str) -> Option<Duration> {
-    if delay == "inf" { return None }
+    if delay == "inf" {
+        return None;
+    }
     let default_delay = Some(Duration::from_secs(1));
     let mut chars = delay.chars();
     let mut num_part = String::new();
@@ -1076,12 +1475,14 @@ fn parse_reuse_check_delay(delay: &str) -> Option<Duration> {
                 "h" => 3600,
                 _ => return default_delay,
             };
-            return Some(Duration::from_secs(num * multiplier))
+            return Some(Duration::from_secs(num * multiplier));
         }
     }
     if !num_part.is_empty() {
         num_part.parse().ok().map(Duration::from_secs)
-    } else { default_delay }
+    } else {
+        default_delay
+    }
 }
 
 fn try_read_dotenv(dotenv_path: &PathBuf, dotenv_string: &str) {
@@ -1116,7 +1517,7 @@ fn signals_handler(pid: Pid, mount_point: &Path, killpid: bool, selfexit: bool) 
         Ok(sig) => sig,
         Err(err) => {
             eprintln!("Failed to register signal handlers: {err}");
-            return
+            return;
         }
     };
     let _handle = signals.handle();
@@ -1134,8 +1535,12 @@ fn signals_handler(pid: Pid, mount_point: &Path, killpid: bool, selfexit: bool) 
                     }
                 }
             }
-            if selfexit { exit(0) };
-            if !killpid { break }
+            if selfexit {
+                exit(0)
+            };
+            if !killpid {
+                break;
+            }
         }
     }
 }
@@ -1159,14 +1564,20 @@ fn fast_hash_file(path: &PathBuf, offset: u64) -> Result<u32> {
     Ok(xxh3_64(&buffer) as u32)
 }
 
-fn print_usage(portable_home: &PathBuf, portable_share: &PathBuf, portable_config: &PathBuf, portable_cache: &PathBuf, self_exe_dotenv: &PathBuf) {
+fn print_usage(
+    portable_home: &PathBuf,
+    portable_share: &PathBuf,
+    portable_config: &PathBuf,
+    portable_cache: &PathBuf,
+    self_exe_dotenv: &PathBuf,
+) {
     println!("{} v{URUNTIME_VERSION}
    Repository: {}
 
    Runtime options:
     --{ARG_PFX}-extract [PATTERN]          Extract content from embedded filesystem image
                                              If pattern is passed, only extract matching files
-     --{ARG_PFX}-extract-and-run [ARGS]    Run the {SELF_NAME} afer extraction without using FUSE
+     --{ARG_PFX}-extract-and-run [ARGS]    Run the {SELF_NAME} after extraction without using FUSE
      --{ARG_PFX}-offset                    Print byte offset to start of embedded filesystem image
      --{ARG_PFX}-portable-home             Create a portable home folder to use as $HOME
      --{ARG_PFX}-portable-share            Create a portable share folder to use as $XDG_DATA_HOME
@@ -1174,6 +1585,12 @@ fn print_usage(portable_home: &PathBuf, portable_share: &PathBuf, portable_confi
      --{ARG_PFX}-portable-cache            Create a portable cache folder to use as $XDG_CACHE_HOME
      --{ARG_PFX}-help                      Print this help
      --{ARG_PFX}-unshare                   Try to use unshare user and mount namespaces
+     --{ARG_PFX}-unshare-root              Use unshare and map the current user to UID/GID 0
+     --{ARG_PFX}-unshare-uid UID           Use unshare and map the current UID to UID
+     --{ARG_PFX}-unshare-gid GID           Use unshare and map the current GID to GID
+     --{ARG_PFX}-unshare-drop-caps         Use unshare and drop capabilities before the application
+     --{ARG_PFX}-unshare-fallback-drop-caps
+                                             Drop capabilities only when unshare is selected as fallback
      --{ARG_PFX}-version                   Print version of Runtime
      --{ARG_PFX}-signature                 Print digital signature embedded in {SELF_NAME}
      --{ARG_PFX}-addsign    'SIGN|/file'   Add digital signature to {SELF_NAME}
@@ -1204,11 +1621,14 @@ fn print_usage(portable_home: &PathBuf, portable_share: &PathBuf, portable_confi
     println!("      --{ARG_PFX}-mkdwarfs      [ARGS]       Launch mkdwarfs");
     #[cfg(feature = "dwarfs")]
     println!("      --{ARG_PFX}-dwarfsextract [ARGS]       Launch dwarfsextract");
-    println!("
+    println!(
+        "
       Also you can create a hardlink, symlink or rename the runtime with
-      the name of the built-in utility to use it directly.");
+      the name of the built-in utility to use it directly."
+    );
 
-    println!("\n    Portable home and config:
+    println!(
+        "\n    Portable home and config:
 
       If you would like the application contained inside this {SELF_NAME} to store its
       data alongside this {SELF_NAME} rather than in your home directory, then you can
@@ -1231,17 +1651,22 @@ fn print_usage(portable_home: &PathBuf, portable_share: &PathBuf, portable_confi
       --{ARG_PFX}-portable-cache option, which will create this directory for you.
       As long as the directory exists and is neither moved nor renamed, the
       application contained inside this {SELF_NAME} to store its data in this
-      directory rather than in your home directory", portable_home, portable_share, portable_config, portable_cache);
+      directory rather than in your home directory",
+        portable_home, portable_share, portable_config, portable_cache
+    );
 
     println!("\n    Environment variables:
 
       URUNTIME                       Path to uruntime
       URUNTIME_DIR                   Path to uruntime directory
       {ENV_NAME}_UNSHARE=1             Try to use unshare user and mount namespaces
+      {ENV_NAME}_UNSHARE=2             Use unshare and drop capabilities before the application
+      {ENV_NAME}_UNSHARE=3             Drop capabilities only when unshare is selected as fallback
       {ENV_NAME}_UNSHARE_ROOT=1        Map to root (UID 0, GID 0) in user namespace
       {ENV_NAME}_UNSHARE_UID=0         Map to specified UID in user namespace
       {ENV_NAME}_UNSHARE_GID=0         Map to specified GID in user namespace
-      {ENV_NAME}_EXTRACT_AND_RUN=1     Run the {SELF_NAME} afer extraction without using FUSE
+
+      {ENV_NAME}_EXTRACT_AND_RUN=1     Run the {SELF_NAME} after extraction without using FUSE
       NO_CLEANUP=1                   Do not clear the unpacking directory after closing when
                                        using extract and run option for reuse extracted data
       NO_UNMOUNT=1                   Do not unmount the mount directory after closing
@@ -1255,7 +1680,7 @@ fn print_usage(portable_home: &PathBuf, portable_share: &PathBuf, portable_confi
       NO_MEMFDEXEC=1                 Do not use memfd-exec (use a temporary file instead)");
     #[cfg(feature = "dwarfs")]
     {
-    println!("      DWARFS_WORKERS=2               Number of worker threads for DwarFS (default: equal CPU threads)
+        println!("      DWARFS_WORKERS=2               Number of worker threads for DwarFS (default: equal CPU threads)
       DWARFS_CACHESIZE=1024M         Size of the block cache, in bytes for DwarFS (suffixes K, M, G)
       DWARFS_BLOCKSIZE=512K          Size of the block file I/O, in bytes for DwarFS (suffixes K, M, G)
       DWARFS_READAHEAD=32M           Set readahead size, in bytes for DwarFS (suffixes K, M, G)
@@ -1280,31 +1705,59 @@ fn main() {
 
     match arg0_name.as_str() {
         #[cfg(feature = "squashfs")]
-        "squashfuse"       => { embed.squashfuse(exec_args); return }
+        "squashfuse" => {
+            embed.squashfuse(exec_args);
+            return;
+        }
         #[cfg(feature = "squashfs")]
-        "unsquashfs"       => { embed.unsquashfs(exec_args); return }
+        "unsquashfs" => {
+            embed.unsquashfs(exec_args);
+            return;
+        }
         #[cfg(feature = "squashfs")]
-        "sqfscat"       => { embed.sqfscat(exec_args); return }
+        "sqfscat" => {
+            embed.sqfscat(exec_args);
+            return;
+        }
         #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
-        "mksquashfs"       => { embed.mksquashfs(exec_args); return }
+        "mksquashfs" => {
+            embed.mksquashfs(exec_args);
+            return;
+        }
         #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
-        "sqfstar"       => { embed.sqfstar(exec_args); return }
+        "sqfstar" => {
+            embed.sqfstar(exec_args);
+            return;
+        }
         #[cfg(feature = "dwarfs")]
-        "dwarfs"           => { embed.dwarfs(exec_args); return }
+        "dwarfs" => {
+            embed.dwarfs(exec_args);
+            return;
+        }
         #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
-        "dwarfsck"         => { embed.dwarfsck(exec_args); return }
+        "dwarfsck" => {
+            embed.dwarfsck(exec_args);
+            return;
+        }
         #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
-        "mkdwarfs"         => { embed.mkdwarfs(exec_args); return }
+        "mkdwarfs" => {
+            embed.mkdwarfs(exec_args);
+            return;
+        }
         #[cfg(feature = "dwarfs")]
-        "dwarfsextract"    => { embed.dwarfsextract(exec_args); return }
-        "fusermount" | "fusermount3"    => {
+        "dwarfsextract" => {
+            embed.dwarfsextract(exec_args);
+            return;
+        }
+        "fusermount" | "fusermount3" => {
             let mut umount = false;
             let mut mount_point = String::new();
             for arg in &exec_args {
-                if arg == "-u" || arg == "--unmount" { umount = true }
-                else if !arg.starts_with('-') {
+                if arg == "-u" || arg == "--unmount" {
+                    umount = true
+                } else if !arg.starts_with('-') {
                     mount_point = arg.clone();
-                    break
+                    break;
                 }
             }
             let current_path = env::var("PATH").unwrap_or_default();
@@ -1316,101 +1769,116 @@ fn main() {
             env::set_var("PATH", filtered_path);
             drop(current_path);
             if umount && !mount_point.is_empty() {
-                if !try_unmount(None, Path::new(&mount_point))
-                    { exit(1) } return
+                if !try_unmount(None, Path::new(&mount_point)) {
+                    exit(1)
+                }
+                return;
             }
-            let err = Command::new(arg0_name)
-                .args(&exec_args).exec();
+            let err = Command::new(arg0_name).args(&exec_args).exec();
             eprintln!("Failed to execute {arg0_name}: {err}");
             exit(1)
-         }
+        }
         _ => {}
     }
 
+    let unshare_cli = parse_unshare_cli_options(&mut exec_args, ARG_PFX).unwrap_or_else(|error| {
+        eprintln!("Invalid unshare option: {error}");
+        exit(2)
+    });
     let arg1 = if !exec_args.is_empty() {
         exec_args[0].to_string()
-    } else {"".into()};
+    } else {
+        "".into()
+    };
 
     if !arg1.is_empty() {
         match arg1 {
             arg if arg == format!("--{ARG_PFX}-version") => {
                 println!("v{URUNTIME_VERSION}");
-                return
+                return;
             }
             #[cfg(feature = "squashfs")]
             arg if arg == format!("--{ARG_PFX}-squashfuse") => {
                 embed.squashfuse(exec_args[1..].to_vec());
-                return
+                return;
             }
             #[cfg(feature = "squashfs")]
             arg if arg == format!("--{ARG_PFX}-unsquashfs") => {
                 embed.unsquashfs(exec_args[1..].to_vec());
-                return
+                return;
             }
             #[cfg(feature = "squashfs")]
             arg if arg == format!("--{ARG_PFX}-sqfscat") => {
                 embed.sqfscat(exec_args[1..].to_vec());
-                return
+                return;
             }
             #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
             arg if arg == format!("--{ARG_PFX}-mksquashfs") => {
                 embed.mksquashfs(exec_args[1..].to_vec());
-                return
+                return;
             }
             #[cfg(all(not(feature = "lite"), feature = "squashfs"))]
             arg if arg == format!("--{ARG_PFX}-sqfstar") => {
                 embed.sqfstar(exec_args[1..].to_vec());
-                return
+                return;
             }
             #[cfg(feature = "dwarfs")]
             arg if arg == format!("--{ARG_PFX}-dwarfs") => {
                 embed.dwarfs(exec_args[1..].to_vec());
-                return
+                return;
             }
             #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
             arg if arg == format!("--{ARG_PFX}-dwarfsck") => {
                 embed.dwarfsck(exec_args[1..].to_vec());
-                return
+                return;
             }
             #[cfg(all(not(feature = "lite"), feature = "dwarfs"))]
             arg if arg == format!("--{ARG_PFX}-mkdwarfs") => {
                 embed.mkdwarfs(exec_args[1..].to_vec());
-                return
+                return;
             }
             #[cfg(feature = "dwarfs")]
             arg if arg == format!("--{ARG_PFX}-dwarfsextract") => {
                 embed.dwarfsextract(exec_args[1..].to_vec());
-                return
+                return;
             }
             _ => {}
         }
     }
 
-    let uruntime = &current_exe().unwrap_or_else(|err|{
+    let uruntime = &current_exe().unwrap_or_else(|err| {
         eprintln!("Failed to get self runtime exe path: {err}");
         exit(1)
     });
     let target_image = &PathBuf::from(get_env_var!("TARGET_{}", ENV_NAME));
-    let self_exe = if target_image.is_file() { target_image } else { uruntime };
+    let self_exe = if target_image.is_file() {
+        target_image
+    } else {
+        uruntime
+    };
 
-    let runtime = get_runtime(self_exe).unwrap_or_else(|err|{
+    let runtime = get_runtime(self_exe).unwrap_or_else(|err| {
         eprintln!("Failed to get runtime: {err}");
         exit(1)
     });
     let runtime_size = runtime.size;
 
-    let uruntime_dir = uruntime.parent().unwrap_or_else(||{
+    let uruntime_dir = uruntime.parent().unwrap_or_else(|| {
         eprintln!("Failed to get self runtime parent dir!");
         exit(1)
     });
-    let self_exe_dir = self_exe.parent().unwrap_or_else(||{
+    let self_exe_dir = self_exe.parent().unwrap_or_else(|| {
         eprintln!("Failed to get runtime parent dir!");
         exit(1)
     });
-    let self_exe_name = self_exe.file_name().unwrap_or_else(||{
-        eprintln!("Failed to get runtime name!");
-        exit(1)
-    }).to_str().unwrap_or_default();
+    let self_exe_name = self_exe
+        .file_name()
+        .unwrap_or_else(|| {
+            eprintln!("Failed to get runtime name!");
+            exit(1)
+        })
+        .to_str()
+        .unwrap_or_default();
 
     let portable_home = &self_exe_dir.join(format!("{self_exe_name}.home"));
     let portable_share = &self_exe_dir.join(format!("{self_exe_name}.share"));
@@ -1425,8 +1893,17 @@ fn main() {
 
     let mut is_mount_only = false;
     let mut is_extract_run = false;
-    let mut is_noclenup = !matches!(URUNTIME_CLEANUP.replace("URUNTIME_CLEANUP=", "=").as_str(), "=1");
-    let mut is_unshare = matches!(URUNTIME_UNSHARE.replace("URUNTIME_UNSHARE=", "=").as_str(), "=1");
+    let mut is_noclenup = !matches!(
+        URUNTIME_CLEANUP.replace("URUNTIME_CLEANUP=", "=").as_str(),
+        "=1"
+    );
+    let unshare_mode = URUNTIME_UNSHARE.replace("URUNTIME_UNSHARE=", "=");
+    let (mut is_unshare, mut drop_caps, mut drop_caps_on_fallback) =
+        embedded_unshare_policy(&unshare_mode);
+    is_unshare |= unshare_cli.enable;
+    drop_caps |= unshare_cli.drop_caps;
+    drop_caps_on_fallback |= unshare_cli.drop_caps_on_fallback;
+    let arg1 = exec_args.first().cloned().unwrap_or_default();
 
     if get_env_var!("{}_EXTRACT_AND_RUN", ENV_NAME) == "1" {
         is_extract_run = true
@@ -1435,84 +1912,103 @@ fn main() {
     if !arg1.is_empty() {
         match arg1 {
             arg if arg == format!("--{ARG_PFX}-help") => {
-                print_usage(portable_home, portable_share, portable_config, portable_cache, self_exe_dotenv);
-                return
+                print_usage(
+                    portable_home,
+                    portable_share,
+                    portable_config,
+                    portable_cache,
+                    self_exe_dotenv,
+                );
+                return;
             }
             arg if arg == format!("--{ARG_PFX}-portable-home") => {
                 if let Err(err) = create_dir(portable_home) {
-                    eprintln!("Failed to create portable home directory: {:?}: {err}", portable_home)
+                    eprintln!(
+                        "Failed to create portable home directory: {:?}: {err}",
+                        portable_home
+                    )
                 }
                 println!("Portable home directory created: {:?}", portable_home);
-                return
+                return;
             }
             arg if arg == format!("--{ARG_PFX}-portable-share") => {
                 if let Err(err) = create_dir(portable_share) {
-                    eprintln!("Failed to create portable share directory: {:?}: {err}", portable_share)
+                    eprintln!(
+                        "Failed to create portable share directory: {:?}: {err}",
+                        portable_share
+                    )
                 }
                 println!("Portable share directory created: {:?}", portable_share);
-                return
+                return;
             }
             arg if arg == format!("--{ARG_PFX}-portable-config") => {
                 if let Err(err) = create_dir(portable_config) {
-                    eprintln!("Failed to create portable config directory: {:?}: {err}", portable_config)
+                    eprintln!(
+                        "Failed to create portable config directory: {:?}: {err}",
+                        portable_config
+                    )
                 }
                 println!("Portable config directory created: {:?}", portable_config);
-                return
+                return;
             }
             arg if arg == format!("--{ARG_PFX}-portable-cache") => {
                 if let Err(err) = create_dir(portable_cache) {
-                    eprintln!("Failed to create portable cache directory: {:?}: {err}", portable_cache)
+                    eprintln!(
+                        "Failed to create portable cache directory: {:?}: {err}",
+                        portable_cache
+                    )
                 }
                 println!("Portable cache directory created: {:?}", portable_cache);
-                return
+                return;
             }
             arg if arg == format!("--{ARG_PFX}-offset") => {
                 println!("{runtime_size}");
-                return
+                return;
             }
-            arg if arg == format!("--{ARG_PFX}-updateinfo") ||
-                           arg == format!("--{ARG_PFX}-updateinformation") => {
+            arg if arg == format!("--{ARG_PFX}-updateinfo")
+                || arg == format!("--{ARG_PFX}-updateinformation") =>
+            {
                 let updateinfo = get_section_data(&runtime.headers_bytes, ".upd_info")
-                    .unwrap_or_else(|err|{
+                    .unwrap_or_else(|err| {
                         eprintln!("Failed to get update info: {err}");
                         exit(1)
-                });
+                    });
                 println!("{updateinfo}");
-                return
+                return;
             }
             arg if arg == format!("--{ARG_PFX}-addupdinfo") => {
                 if let Err(err) = add_section_data(&runtime, ".upd_info", &exec_args) {
                     eprintln!("Failed to add update info: {err}");
                     exit(1)
                 };
-                return
+                return;
             }
             arg if arg == format!("--{ARG_PFX}-signature") => {
                 let signature = get_section_data(&runtime.headers_bytes, ".sha256_sig")
-                    .unwrap_or_else(|err|{
+                    .unwrap_or_else(|err| {
                         eprintln!("Failed to get signature info: {err}");
                         exit(1)
-                });
+                    });
                 println!("{signature}");
-                return
+                return;
             }
             arg if arg == format!("--{ARG_PFX}-addsign") => {
                 if let Err(err) = add_section_data(&runtime, ".sha256_sig", &exec_args) {
                     eprintln!("Failed to add signature info: {err}");
                     exit(1)
                 };
-                return
+                return;
             }
             arg if arg == format!("--{ARG_PFX}-envs") => {
                 println!("{}", runtime.envs);
-                return
+                return;
             }
             arg if arg == format!("--{ARG_PFX}-addenvs") => {
                 if let Err(err) = add_section_data(&runtime, ".envs", &exec_args) {
                     eprintln!("Failed to add envs: {err}");
                     exit(1)
                 };
-                return
+                return;
             }
             ref arg if arg == &format!("--{ARG_PFX}-extract-and-run") => {
                 exec_args.remove(0);
@@ -1535,35 +2031,41 @@ fn main() {
     if !arg1.is_empty() {
         match arg1 {
             arg if arg == format!("--{ARG_PFX}-extract") => {
-                extract_image(&embed, &image, PathBuf::from("."),
-                    false, exec_args.get(1));
-                return
+                extract_image(&embed, &image, PathBuf::from("."), false, exec_args.get(1));
+                return;
             }
-            arg if arg == format!("--{ARG_PFX}-mount") => {
-                is_mount_only = true
-            }
+            arg if arg == format!("--{ARG_PFX}-mount") => is_mount_only = true,
             _ => {}
         }
     }
 
-    let uruntime_extract =
-    match URUNTIME_EXTRACT.replace("URUNTIME_EXTRACT=", "=").as_str() {
-        "=1" => { is_extract_run = true; 1 }
-        "=2" => { 2 }
-        "=3" => { 3 }
-        _ => { 0 }
+    let uruntime_extract = match URUNTIME_EXTRACT.replace("URUNTIME_EXTRACT=", "=").as_str() {
+        "=1" => {
+            is_extract_run = true;
+            1
+        }
+        "=2" => 2,
+        "=3" => 3,
+        _ => 0,
     };
 
     let mut reuse_check_delay = get_env_var!("REUSE_CHECK_DELAY");
 
     let (mut is_remp_mount, default_delay) =
-    match URUNTIME_MOUNT.replace("URUNTIME_MOUNT=", "=").as_str() {
-        "=0" => (true, if is_extract_run { Some(REUSE_CHECK_DELAY) } else { Some("inf") }),
-        "=1" => (false, None),
-        "=2" => (true, Some("30m")),
-        "=3" => (true, Some(REUSE_CHECK_DELAY)),
-        _ => (false, None),
-    };
+        match URUNTIME_MOUNT.replace("URUNTIME_MOUNT=", "=").as_str() {
+            "=0" => (
+                true,
+                if is_extract_run {
+                    Some(REUSE_CHECK_DELAY)
+                } else {
+                    Some("inf")
+                },
+            ),
+            "=1" => (false, None),
+            "=2" => (true, Some("30m")),
+            "=3" => (true, Some(REUSE_CHECK_DELAY)),
+            _ => (false, None),
+        };
 
     if let Some(default) = default_delay {
         if reuse_check_delay.is_empty() {
@@ -1575,33 +2077,31 @@ fn main() {
 
     let target_dir = get_env_var!("{}_TARGET_DIR", ENV_NAME);
     let target_dir_is_empty = target_dir.is_empty();
-    let mut tmp_dir: PathBuf;
-    let tmp_dirs: Vec<&PathBuf>;
-    #[cfg(not(feature = "appimage"))]
-    let ruid_dir: PathBuf;
-    #[cfg(not(feature = "appimage"))]
-    let mnt_dir: PathBuf;
 
     let uid: u32 = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
-    if target_dir_is_empty {
-        tmp_dir = env::temp_dir();
+    let (tmp_dir, tmp_dirs) = if target_dir_is_empty {
+        let base_tmp_dir = env::temp_dir();
         let mut self_hash = "".to_string();
-        let first5name: String = self_exe_name.split(".").next()
-        .unwrap_or(self_exe_name)
+        let first5name: String = self_exe_name
+            .split(".")
+            .next()
+            .unwrap_or(self_exe_name)
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
             .take(5)
             .collect();
         if is_extract_run || is_remp_mount {
-            self_hash = hash_string(&(
-                xxh3_64(&runtime.headers_bytes) as u32 +
-                fast_hash_file(&image.path, image.offset).unwrap_or_else(|err|{
-                    eprintln!("Failed to get image hash: {err}");
-                    exit(1)}) +
-                uid
-            ).to_string())
+            self_hash = hash_string(
+                &(xxh3_64(&runtime.headers_bytes) as u32
+                    + fast_hash_file(&image.path, image.offset).unwrap_or_else(|err| {
+                        eprintln!("Failed to get image hash: {err}");
+                        exit(1)
+                    })
+                    + uid)
+                    .to_string(),
+            )
         }
 
         cfg_if! {
@@ -1613,11 +2113,11 @@ fn main() {
                 } else {
                     format!(".mount_{first5name}{}", random_string(6))
                 };
-                tmp_dir = tmp_dir.join(tmp_dir_name);
-                tmp_dirs = vec![&tmp_dir];
+                let tmp_dir = base_tmp_dir.join(tmp_dir_name);
+                (tmp_dir.clone(), vec![tmp_dir])
             } else {
-                ruid_dir = tmp_dir.join(format!(".r{uid}"));
-                mnt_dir = ruid_dir.join("mnt");
+                let ruid_dir = base_tmp_dir.join(format!(".r{uid}"));
+                let mnt_dir = ruid_dir.join("mnt");
                 let tmp_dir_name: String = if is_extract_run && !is_mount_only {
                     format!("{first5name}extr{self_hash}")
                 } else if is_remp_mount {
@@ -1625,23 +2125,44 @@ fn main() {
                 } else {
                     format!("{first5name}{}", random_string(6))
                 };
-                tmp_dir = mnt_dir.join(tmp_dir_name);
-                tmp_dirs = vec![&tmp_dir, &mnt_dir, &ruid_dir];
+                let tmp_dir = mnt_dir.join(tmp_dir_name);
+                (tmp_dir.clone(), vec![tmp_dir, mnt_dir, ruid_dir])
             }
         }
     } else {
         env::remove_var(format!("{ENV_NAME}_TARGET_DIR"));
-        tmp_dir = PathBuf::from(target_dir);
-        tmp_dirs = vec![&tmp_dir]
-    }
+        let tmp_dir = PathBuf::from(target_dir);
+        (tmp_dir.clone(), vec![tmp_dir])
+    };
     drop(runtime);
 
     let mut unshare_succeeded = false;
-    let (unshare_uid, unshare_gid) =
-    if get_env_var!("{}_UNSHARE_ROOT", ENV_NAME) == "1" { ("0".into(), "0".into()) }
-    else { (get_env_var!("{}_UNSHARE_UID", ENV_NAME), get_env_var!("{}_UNSHARE_GID", ENV_NAME)) };
-    if !unshare_uid.is_empty() || !unshare_gid.is_empty() || get_env_var!("{}_UNSHARE", ENV_NAME) == "1"
-        { is_unshare = true }
+    let env_unshare = get_env_var!("{}_UNSHARE", ENV_NAME);
+    let (env_enables_unshare, env_drops_caps, env_drops_caps_on_fallback) =
+        environment_drop_caps_policy(&env_unshare);
+    is_unshare |= env_enables_unshare;
+    drop_caps |= env_drops_caps;
+    drop_caps_on_fallback |= env_drops_caps_on_fallback;
+
+    let env_unshare_root = get_env_var!("{}_UNSHARE_ROOT", ENV_NAME) == "1";
+    let (unshare_uid, unshare_gid) = if unshare_cli.root || env_unshare_root {
+        ("0".into(), "0".into())
+    } else {
+        (
+            unshare_cli
+                .uid
+                .unwrap_or_else(|| get_env_var!("{}_UNSHARE_UID", ENV_NAME)),
+            unshare_cli
+                .gid
+                .unwrap_or_else(|| get_env_var!("{}_UNSHARE_GID", ENV_NAME)),
+        )
+    };
+    if !unshare_uid.is_empty() || !unshare_gid.is_empty() || env_enables_unshare {
+        is_unshare = true
+    }
+    if is_unshare && drop_caps_on_fallback {
+        drop_caps = true;
+    }
 
     let mut is_tmpdir_exists = false;
     let mut is_unshare_remp = false;
@@ -1654,17 +2175,21 @@ fn main() {
             child_pid = pid
         }
     }
+    if fallback_should_drop_capabilities(unshare_succeeded && !is_unshare, drop_caps_on_fallback) {
+        drop_caps = true;
+    }
 
     if !is_unshare_remp {
-        is_tmpdir_exists = is_mounted(&tmp_dir).unwrap_or(false) ||
-            if let Ok(dir) = tmp_dir.read_dir() {
-                dir.flatten().any(|entry|entry.path().exists())
-            } else { false };
+        is_tmpdir_exists = is_mounted(&tmp_dir).unwrap_or(false)
+            || if let Ok(dir) = tmp_dir.read_dir() {
+                dir.flatten().any(|entry| entry.path().exists())
+            } else {
+                false
+            };
     }
 
     if is_remp_mount && !is_extract_run && !is_unshare_remp {
-        child_pid = read_mount_pid_file(&tmp_dir, "pid")
-            .unwrap_or(Pid::from_raw(0))
+        child_pid = read_mount_pid_file(&tmp_dir, "pid").unwrap_or(Pid::from_raw(0))
     }
 
     if !is_tmpdir_exists {
@@ -1672,13 +2197,31 @@ fn main() {
             unshare_succeeded = try_unshare(uid, gid, &unshare_uid, &unshare_gid);
         }
 
-        if (!is_extract_run || is_mount_only) &&
-        !check_fuse(uruntime, uid, gid, &unshare_uid, &unshare_gid, &mut unshare_succeeded, &mut is_unshare) {
-            check_extract!(is_mount_only, uruntime_extract, self_exe, {
-                is_extract_run = true
-            });
+        if !is_extract_run || is_mount_only {
+            let unshare_was_requested = is_unshare;
+            let fuse_available = check_fuse(
+                uruntime,
+                uid,
+                gid,
+                &unshare_uid,
+                &unshare_gid,
+                &mut unshare_succeeded,
+                &mut is_unshare,
+            );
+            if fallback_should_drop_capabilities(
+                unshare_succeeded && !unshare_was_requested,
+                drop_caps_on_fallback,
+            ) {
+                drop_caps = true;
+            }
+            if !fuse_available {
+                check_extract!(is_mount_only, uruntime_extract, self_exe, {
+                    is_extract_run = true
+                });
+            }
         }
-        drop(unshare_uid); drop(unshare_gid);
+        drop(unshare_uid);
+        drop(unshare_gid);
 
         if is_mount_only {
             is_extract_run = false
@@ -1695,8 +2238,10 @@ fn main() {
             Ok(ForkResult::Parent { child }) => child,
             Ok(ForkResult::Child) => {
                 try_setsid();
-                if unshare_succeeded { restore_capabilities() }
-                if let Err(err) = create_tmp_dirs(tmp_dirs) {
+                if unshare_succeeded {
+                    restore_capabilities()
+                }
+                if let Err(err) = create_tmp_dirs(&tmp_dirs) {
                     eprintln!("Failed to create tmp dir: {err}");
                     exit(1)
                 }
@@ -1717,23 +2262,26 @@ fn main() {
         if is_extract_run {
             if let Err(err) = waitpid(child_pid, None) {
                 eprintln!("Failed to extract image: {err}");
-                remove_tmp_dirs(tmp_dirs, unshare_succeeded);
+                remove_tmp_dirs(&tmp_dirs, unshare_succeeded);
                 exit(1)
             }
         } else if !wait_mount(child_pid, &tmp_dir, Duration::from_secs(1)) {
-            remove_tmp_dirs(tmp_dirs, unshare_succeeded);
+            remove_tmp_dirs(&tmp_dirs, unshare_succeeded);
             let mut cmd = Command::new(self_exe);
             if !unshare_succeeded && !is_unshare {
                 eprintln!("Trying to unshare...");
                 cmd.env(format!("{ENV_NAME}_UNSHARE"), "1");
+                if drop_caps_on_fallback {
+                    cmd.env(format!("{ENV_NAME}_UNSHARE"), "2");
+                }
             } else {
                 check_extract!(is_mount_only, uruntime_extract, self_exe, {
                     eprintln!("Trying to extract and run...");
                     if is_unshare && !unshare_succeeded {
                         cmd.env_remove(format!("{ENV_NAME}_UNSHARE"))
-                        .env_remove(format!("{ENV_NAME}_UNSHARE_ROOT"))
-                        .env_remove(format!("{ENV_NAME}_UNSHARE_UID"))
-                        .env_remove(format!("{ENV_NAME}_UNSHARE_GID"));
+                            .env_remove(format!("{ENV_NAME}_UNSHARE_ROOT"))
+                            .env_remove(format!("{ENV_NAME}_UNSHARE_UID"))
+                            .env_remove(format!("{ENV_NAME}_UNSHARE_GID"));
                     }
                     cmd.env(format!("{ENV_NAME}_EXTRACT_AND_RUN"), "1");
                 });
@@ -1752,7 +2300,9 @@ fn main() {
     if is_mount_only {
         if unshare_succeeded && (!is_tmpdir_exists || is_unshare_remp) {
             println!("/proc/{child_pid}/root{}", tmp_dir.display())
-        } else { println!("{}", tmp_dir.display()) }
+        } else {
+            println!("{}", tmp_dir.display())
+        }
     }
 
     let mut exit_code = 0;
@@ -1762,7 +2312,7 @@ fn main() {
                 let run = tmp_dir.join("AppRun");
                 if !run.is_file() {
                     eprintln!("AppRun not found: {:?}", run);
-                    remove_tmp_dirs(tmp_dirs, unshare_succeeded);
+                    remove_tmp_dirs(&tmp_dirs, unshare_succeeded);
                     exit(1)
                 }
                 env::set_var("ARGV0", arg0);
@@ -1773,7 +2323,7 @@ fn main() {
                 let run = tmp_dir.join("static").join("bash");
                 if !run.is_file() {
                     eprintln!("Static bash not found: {:?}", run);
-                    remove_tmp_dirs(tmp_dirs, unshare_succeeded);
+                    remove_tmp_dirs(&tmp_dirs, unshare_succeeded);
                     exit(1)
                 }
                 exec_args.insert(0, format!("{}/Run.sh", tmp_dir.display()));
@@ -1790,11 +2340,20 @@ fn main() {
         try_set_portable_dir(portable_cache, "XDG_CACHE_HOME", Some(".cache"));
         try_set_portable_dir(portable_home, "HOME", None);
 
-        match Command::new(run.canonicalize().unwrap_or(run.clone())).args(&exec_args).spawn() {
+        let mut run_command = Command::new(run.canonicalize().unwrap_or(run.clone()));
+        if should_drop_capabilities(unshare_succeeded, drop_caps) {
+            let last_cap = last_capability();
+            unsafe {
+                run_command.pre_exec(move || drop_capabilities(last_cap));
+            }
+        }
+
+        remove_runtime_separator(&mut exec_args);
+        match run_command.args(&exec_args).spawn() {
             Ok(mut run_child) => {
                 let pid = Pid::from_raw(run_child.id() as i32);
                 let tmp_dir_clone = tmp_dir.clone();
-                spawn(move || signals_handler(pid, &tmp_dir_clone, true, false) );
+                spawn(move || signals_handler(pid, &tmp_dir_clone, true, false));
 
                 if let Ok(status) = run_child.wait() {
                     if let Some(code) = status.code() {
@@ -1809,19 +2368,25 @@ fn main() {
         }
     } else if !is_tmpdir_exists {
         let tmp_dir_clone = tmp_dir.clone();
-        spawn(move || signals_handler(child_pid, &tmp_dir_clone, false, false) );
+        spawn(move || signals_handler(child_pid, &tmp_dir_clone, false, false));
         wait_pid_exit(child_pid, None);
-    } else { exit(exit_code) }
+    } else {
+        exit(exit_code)
+    }
 
-    if is_tmpdir_exists { exit(exit_code) } else {
+    if is_tmpdir_exists {
+        exit(exit_code)
+    } else {
         match unsafe { fork() } {
-            Ok(ForkResult::Parent { child: _ }) => { exit(exit_code) }
+            Ok(ForkResult::Parent { child: _ }) => exit(exit_code),
             Ok(ForkResult::Child) => {
                 try_setsid();
-                if unshare_succeeded { restore_capabilities() }
+                if unshare_succeeded {
+                    restore_capabilities()
+                }
 
                 let tmp_dir_clone = tmp_dir.clone();
-                spawn(move || signals_handler(child_pid, &tmp_dir_clone, false, true) );
+                spawn(move || signals_handler(child_pid, &tmp_dir_clone, false, true));
 
                 let is_mount = !is_extract_run && !is_mount_only;
                 let reuse_check_delay = parse_reuse_check_delay(&reuse_check_delay);
@@ -1841,7 +2406,7 @@ fn main() {
                 if is_mount {
                     wait_pid_exit(child_pid, Some(Duration::from_secs(1)));
                 }
-                remove_tmp_dirs(tmp_dirs, unshare_succeeded);
+                remove_tmp_dirs(&tmp_dirs, unshare_succeeded);
                 exit(0)
             }
             Err(err) => {
@@ -1851,3 +2416,6 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod runtime_elf_tests;

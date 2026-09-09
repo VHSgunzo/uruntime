@@ -2,4 +2,12 @@
 name = "xtask"
 version = "0.1.0"
 authors = ["Aleksey Kladov <aleksey.kladov@gmail.com>"]
-edition = "2018"
+edition = "2021"
+
+[dependencies]
+fs2 = "0.4.3"
+sha2 = "0.10.9"
+serde_json = "1.0.145"
+tempfile = "3.23.0"
+zstd = { version = "0.13.3", default-features = false }
+xxhash-rust = { version = "0.8.18", features = ["xxh64"] }
