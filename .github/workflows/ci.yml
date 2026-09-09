@@ -25,8 +25,14 @@ jobs:
 
       - name: Install preflight dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes musl-tools python3-yaml
+          sudo apt-get \
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- \
+            update
+          sudo apt-get \
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- \
+            install --yes musl-tools python3-yaml
           rustup component add rust-src rustfmt clippy
           rustup target add x86_64-unknown-linux-musl
 
@@ -58,8 +64,14 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes binutils curl llvm musl-tools xz-utils
+          sudo apt-get \
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- \
+            update
+          sudo apt-get \
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- \
+            install --yes binutils curl llvm musl-tools xz-utils
           rustup component add rust-src
 
       - name: Build all runtime variants
