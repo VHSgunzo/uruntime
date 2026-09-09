@@ -367,6 +367,10 @@ fn backend_for(arch: &Arch, host_arch: &str) -> Backend {
     }
 }
 
+fn build_backend() -> Backend {
+    Backend::Zig
+}
+
 fn host_artifact_arch() -> &'static str {
     match env::consts::ARCH {
         "powerpc64" if cfg!(target_endian = "little") => "ppc64le",
@@ -1031,7 +1035,7 @@ fn configure_zig(command: &mut Command, arch: &Arch) -> Result<(), DynError> {
 
 fn build(task: &Task) -> Result<(), DynError> {
     create_dist_dir()?;
-    let backend = backend_for(task.arch(), host_artifact_arch());
+    let backend = build_backend();
     eprintln!(
         "building {}: artifact arch={}, Rust target={}, backend={}",
         task.name,
@@ -1044,9 +1048,7 @@ fn build(task: &Task) -> Result<(), DynError> {
     command
         .current_dir(project_root())
         .args(cargo_build_args(task.arch(), task.variant()));
-    if backend == Backend::Zig {
-        configure_zig(&mut command, task.arch())?;
-    }
+    configure_zig(&mut command, task.arch())?;
     let status = command.status()?;
     if !status.success() {
         return Err(format!("cargo build failed for {}", task.name).into());

@@ -183,6 +183,11 @@ fn backend_is_cargo_for_native_arch_and_zig_for_every_foreign_arch() {
 }
 
 #[test]
+fn release_builds_always_use_the_pinned_zig_linker() {
+    assert_eq!(build_backend(), Backend::Zig);
+}
+
+#[test]
 fn zig_bootstrap_is_version_and_sha256_pinned_for_supported_linux_hosts() {
     let expected = [
         ("x86_64", "x86_64-linux"),
