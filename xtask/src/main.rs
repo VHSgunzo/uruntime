@@ -279,20 +279,7 @@ impl Task {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Backend {
-    Cargo,
-    Zig,
-}
-
-impl Backend {
-    fn display(self) -> &'static str {
-        match self {
-            Self::Cargo => "cargo (native linker)",
-            Self::Zig => "cargo + Zig 0.16.0",
-        }
-    }
-}
+const BUILD_BACKEND: &str = "cargo + Zig 0.16.0";
 
 fn arch_by_name(name: &str) -> Option<&'static Arch> {
     ARCHES.iter().find(|arch| arch.artifact_name == name)
@@ -359,16 +346,8 @@ fn cargo_build_args(arch: &Arch, variant: &Variant) -> Vec<String> {
     args
 }
 
-fn backend_for(arch: &Arch, host_arch: &str) -> Backend {
-    if arch.artifact_name == host_arch {
-        Backend::Cargo
-    } else {
-        Backend::Zig
-    }
-}
-
-fn build_backend() -> Backend {
-    Backend::Zig
+fn target_is_foreign(arch: &Arch, host_arch: &str) -> bool {
+    arch.artifact_name != host_arch
 }
 
 fn host_artifact_arch() -> &'static str {
@@ -499,14 +478,23 @@ fn configure_target_runner(command: &mut Command, arch: &Arch) -> Result<(), Dyn
     Ok(())
 }
 
+fn check_command_requirements(args: &[String], foreign: bool) -> (bool, bool) {
+    let targets_root_package = args.iter().any(|arg| arg == "--target");
+    let uses_zig = targets_root_package;
+    let uses_runner = foreign
+        && targets_root_package
+        && args.first().is_some_and(|arg| arg == "test");
+    (uses_zig, uses_runner)
+}
+
 fn run_check_command(args: &[String], arch: &Arch, foreign: bool) -> Result<(), DynError> {
     eprintln!("+ cargo {}", args.join(" "));
     let mut command = Command::new("cargo");
     command.current_dir(project_root()).args(args);
-    let targets_root_package = args.iter().any(|arg| arg == "--target");
-    if foreign && targets_root_package {
+    let (uses_zig, uses_runner) = check_command_requirements(args, foreign);
+    if uses_zig {
         configure_zig(&mut command, arch)?;
-        if args.first().is_some_and(|arg| arg == "test") {
+        if uses_runner {
             configure_target_runner(&mut command, arch)?;
         }
     }
@@ -527,8 +515,11 @@ fn run_checks(target: &str) -> Result<(), DynError> {
                 "unsupported check target `{target}`; use one of the Rust targets shown by `cargo xtask help`"
             )
         })?;
-    let foreign = backend_for(arch, host_artifact_arch()) == Backend::Zig;
-    eprintln!("running local checks for Rust target {target}");
+    let foreign = target_is_foreign(arch, host_artifact_arch());
+    eprintln!(
+        "running local checks for Rust target {target}, backend={}",
+        BUILD_BACKEND
+    );
     for args in check_commands(target) {
         run_check_command(&args, arch, foreign)?;
     }
@@ -1228,13 +1219,12 @@ fn configure_zig(command: &mut Command, arch: &Arch) -> Result<(), DynError> {
 
 fn build(task: &Task) -> Result<(), DynError> {
     create_dist_dir()?;
-    let backend = build_backend();
     eprintln!(
         "building {}: artifact arch={}, Rust target={}, backend={}",
         task.name,
         task.arch().artifact_name,
         task.arch().rust_target,
-        backend.display()
+        BUILD_BACKEND
     );
 
     let mut command = Command::new("cargo");

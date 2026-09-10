@@ -96,7 +96,7 @@ By default, `xtask` selects the musl target for the current Linux platform. On `
 cargo xtask check x86_64-unknown-linux-musl
 ```
 
-An explicitly selected foreign target uses the pinned Zig linker backend and requires the matching QEMU user-mode executable (for example, `qemu-aarch64` or `qemu-aarch64-static`) in `PATH` to run the root tests.
+Root Check, Clippy, and tests always use the pinned Zig linker backend, including when the selected musl target matches the host architecture. An explicitly selected foreign target additionally requires the matching QEMU user-mode executable (for example, `qemu-aarch64` or `qemu-aarch64-static`) in `PATH` to run the root tests.
 
 The command runs `cargo fmt --check`, root Check/Clippy/tests with `--locked`, separate Check/Clippy/tests for `xtask`, `cargo xtask update-checksums --check`, and `git diff --check` in sequence. It stops at the first failure. The checksum step validates all pinned helper sources and Zig metadata. It uses the network only for missing, mismatched, or stale cache entries; a fully populated verified cache works offline.
 

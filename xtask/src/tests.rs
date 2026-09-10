@@ -156,6 +156,40 @@ fn foreign_check_runners_match_every_supported_architecture() {
 }
 
 #[test]
+fn root_checks_always_use_zig_but_native_tests_do_not_use_qemu() {
+    let commands = check_commands("aarch64-unknown-linux-musl");
+    let check = commands
+        .iter()
+        .find(|args| {
+            args.first().is_some_and(|arg| arg == "check")
+                && args.iter().any(|arg| arg == "--target")
+        })
+        .unwrap();
+    let test = commands
+        .iter()
+        .find(|args| {
+            args.first().is_some_and(|arg| arg == "test")
+                && args.iter().any(|arg| arg == "--target")
+        })
+        .unwrap();
+    let xtask_check = commands
+        .iter()
+        .find(|args| {
+            args.first().is_some_and(|arg| arg == "check")
+                && args.iter().any(|arg| arg == "xtask/Cargo.toml")
+        })
+        .unwrap();
+
+    assert_eq!(check_command_requirements(check, false), (true, false));
+    assert_eq!(check_command_requirements(test, false), (true, false));
+    assert_eq!(check_command_requirements(test, true), (true, true));
+    assert_eq!(
+        check_command_requirements(xtask_check, false),
+        (false, false)
+    );
+}
+
+#[test]
 fn help_is_generated_from_the_same_tables() {
     let help = help_text();
     for task in all_tasks() {
@@ -167,24 +201,22 @@ fn help_is_generated_from_the_same_tables() {
 }
 
 #[test]
-fn backend_is_cargo_for_native_arch_and_zig_for_every_foreign_arch() {
+fn target_identity_distinguishes_native_from_foreign_for_qemu() {
     for arch in ARCHES {
-        let expected = if arch.artifact_name == "x86_64" {
-            Backend::Cargo
-        } else {
-            Backend::Zig
-        };
-        assert_eq!(backend_for(&arch, "x86_64"), expected);
+        assert_eq!(
+            target_is_foreign(&arch, "x86_64"),
+            arch.artifact_name != "x86_64"
+        );
     }
-    assert_eq!(
-        backend_for(arch_by_name("x86_64").unwrap(), "aarch64"),
-        Backend::Zig
-    );
+    assert!(target_is_foreign(
+        arch_by_name("x86_64").unwrap(),
+        "aarch64"
+    ));
 }
 
 #[test]
 fn release_builds_always_use_the_pinned_zig_linker() {
-    assert_eq!(build_backend(), Backend::Zig);
+    assert_eq!(BUILD_BACKEND, "cargo + Zig 0.16.0");
 }
 
 #[test]
