@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   preflight:
-    name: Validate pinned downloads
+    name: Run Rust quality gates
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -32,17 +32,22 @@ jobs:
           sudo apt-get \
             -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
             -o Dir::Etc::sourceparts=- \
-            install --yes llvm musl-tools python3-yaml
+            install --yes bubblewrap fuse3 llvm musl-tools qemu-user-static
           rustup component add rust-src rustfmt clippy
-          rustup target add x86_64-unknown-linux-musl
+          rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+      - name: Enable user namespaces for lifecycle sandbox
+        run: |
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-user --ro-bind / / true
 
       - name: Run local quality gates and checksum validation
         run: cargo --locked xtask check
 
-      - name: Test CI artifact and workflow contracts
-        env:
-          PYTHONDONTWRITEBYTECODE: '1'
-        run: python3 -m unittest discover -s tests -p 'test_ci_*.py' -v
+      - name: Run foreign AArch64 quality gates under QEMU
+        run: cargo --locked xtask check aarch64-unknown-linux-musl
 
   build:
     name: Build ${{ matrix.arch }}
@@ -82,7 +87,7 @@ jobs:
         run: sudo apt-get install --yes qemu-user-static
 
       - name: Validate artifact manifest, ELF metadata, and smoke tests
-        run: python3 scripts/ci_artifacts.py validate-arch '${{ matrix.arch }}' dist --smoke
+        run: cargo --locked xtask artifacts validate-arch '${{ matrix.arch }}' dist --smoke
 
       - name: Upload architecture artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -110,8 +115,11 @@ jobs:
           pattern: uruntime-*
           path: artifacts
 
+      - name: Install release tooling
+        run: rustup component add rust-src
+
       - name: Validate and stage the exact release manifest
-        run: python3 scripts/ci_artifacts.py aggregate-release artifacts release-dist
+        run: cargo --locked xtask artifacts aggregate-release artifacts release-dist
 
       - name: Verify the remote tag identifies this workflow commit
         env:
@@ -149,25 +157,7 @@ jobs:
           trap 'rm -f "$releases_file" "$response_file"' EXIT
           gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_file"
-          release_id=$(python3 - "$releases_file" "$RELEASE_TAG" <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as source:
-              pages = json.load(source)
-          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
-              raise SystemExit("invalid paginated release-list response")
-          matches = [release for page in pages for release in page
-                     if isinstance(release, dict) and release.get("tag_name") == sys.argv[2]]
-          if len(matches) > 1:
-              raise SystemExit(f"multiple releases found for exact tag {sys.argv[2]!r}")
-          if matches:
-              release_id = matches[0].get("id")
-              if isinstance(release_id, bool) or not isinstance(release_id, int) or release_id <= 0:
-                  raise SystemExit("exact-tag release has an invalid numeric ID")
-              print(release_id)
-          PY
-          )
+          release_id=$(cargo --locked xtask artifacts release-id "$releases_file" "$RELEASE_TAG")
           release_body=$(printf '%s\n\n%s' "$(cat RELEASE_NOTES.md)" "$RELEASE_MARKER")
           if [[ -n "$release_id" ]]; then
             [[ $release_id =~ ^[0-9]+$ ]]
@@ -223,25 +213,8 @@ jobs:
           gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
             > old-release-assets-pages.json
-          python3 - old-release-assets-pages.json old-release-asset-ids.txt <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as source:
-              pages = json.load(source)
-          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
-              raise SystemExit("invalid paginated asset-list response")
-          assets = [asset for page in pages for asset in page]
-          ids = []
-          for asset in assets:
-              asset_id = asset.get("id") if isinstance(asset, dict) else None
-              if isinstance(asset_id, bool) or not isinstance(asset_id, int) or asset_id <= 0:
-                  raise SystemExit("release asset has an invalid numeric ID")
-              ids.append(asset_id)
-          with open(sys.argv[2], "w", encoding="ascii") as output:
-              for asset_id in ids:
-                  print(asset_id, file=output)
-          PY
+          cargo --locked xtask artifacts asset-ids \
+            old-release-assets-pages.json old-release-asset-ids.txt
           while IFS= read -r asset_id; do
             [[ $asset_id =~ ^[0-9]+$ ]]
             gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
@@ -293,9 +266,9 @@ jobs:
           gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
             > release-assets-pages.json
-          python3 -c 'import json,sys; json.dump([a for p in json.load(open(sys.argv[1])) for a in p], open(sys.argv[2], "w"))' \
+          cargo --locked xtask artifacts flatten-assets \
             release-assets-pages.json release-assets.json
-          python3 scripts/ci_artifacts.py validate-release release-assets.json
+          cargo --locked xtask artifacts validate-release release-assets.json
 
       - name: Re-verify the remote tag immediately before publishing
         env:

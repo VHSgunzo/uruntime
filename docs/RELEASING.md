@@ -9,7 +9,7 @@ Start from an up-to-date `main` and create a separate branch:
 ```sh
 git switch main
 git pull --ff-only
-git switch -c release/v0.7.1
+git switch -c release/vX.X.X
 ```
 
 Before making changes, confirm that the working tree contains no accidental files:
@@ -19,9 +19,19 @@ git status --short
 git diff --check
 ```
 
-Build directories, local helper caches, CI staging, editor settings, and Python caches are excluded through `.gitignore`. Both lockfiles, `Cargo.lock` and `xtask/Cargo.lock`, must be tracked by Git.
+Build directories, local helper caches, CI staging, and editor settings are excluded through `.gitignore`. Both lockfiles, `Cargo.lock` and `xtask/Cargo.lock`, must be tracked by Git.
 
 ## 2. Make the changes
+
+### Keep the changelog and release notes current
+
+Record every notable user-visible, compatibility, security, build, and release-process change in `CHANGELOG.md` as the work is made. Use the `Unreleased` section during development; when preparing a release, move the accumulated entries into a versioned section and set its intended publication date before creating the release commit and tag. Release documentation must be final in the tagged commit and must not require a post-release edit. Each versioned section must describe the complete change set relative to the previous release, including breaking or fail-closed behavior changes and any migration implications. Keep comparison links at the bottom of the file current.
+
+Prepare `RELEASE_NOTES.md` separately for the release being made. It is a concise, polished public overview: highlight the most important benefits, behavior changes, compatibility notes, and upgrade concerns, then link to `CHANGELOG.md` for the exhaustive technical list. Do not turn release notes into a duplicate of the changelog, and do not omit an important public configuration surface or breaking behavior merely to keep them short.
+
+When launch-mode selection, target naming, mount reuse, namespace transitions, supervisor behavior, exit-status propagation, or cleanup changes, update `docs/APPLICATION_LIFECYCLE.md` in the same change. Keep its overview and detailed Mermaid diagrams, decision tables, fallback matrix, and source map consistent with `src/main.rs`.
+
+The release workflow uses `RELEASE_NOTES.md` verbatim when creating or refreshing the GitHub release, so same-tag reruns do not replace the intended notes with an automation placeholder.
 
 ### uruntime code only
 
@@ -29,7 +39,7 @@ Change the code and update the version in the root `Cargo.toml`:
 
 ```toml
 [package]
-version = "0.7.1"
+version = "X.X.X"
 ```
 
 `src/main.rs` gets the version from `CARGO_PKG_VERSION`; there is no separate constant to update.
@@ -82,7 +92,14 @@ git diff -- checksums.txt
 
 ## 3. Run local checks
 
-Update `RELEASE_NOTES.md` with the public notes for the version being prepared. The release workflow uses this file verbatim when creating or refreshing the GitHub release, so same-tag reruns do not replace the intended notes with an automation placeholder.
+Confirm that both release documents are ready before running the final gates:
+
+- `CHANGELOG.md` contains the complete version-to-version technical history for the release;
+- `RELEASE_NOTES.md` contains the concise public release overview and links to the changelog.
+- `docs/APPLICATION_LIFECYCLE.md` matches the current launch, fallback, supervision, and cleanup implementation, and every Mermaid diagram renders successfully.
+- `docs/BUILDING.md`, `docs/TESTING.md`, and `tests/README.md` match the current Rust `xtask` commands and prerequisites.
+
+If reusable-target or cleanup logic changed, keep the checked-in Rust lifecycle harness current. It must cover both SquashFS and DwarFS, overlapping extraction reuse, overlapping current-namespace FUSE reuse, an FD-closing double-fork payload, and live child-subreaper denial without procfs. Run `cargo xtask lifecycle ... --fuse=required` on a host with usable FUSE before release.
 
 Run the full check suite before pushing:
 
@@ -98,7 +115,7 @@ cargo xtask check x86_64-unknown-linux-musl
 
 Root Check, Clippy, and tests always use the pinned Zig linker backend, including when the selected musl target matches the host architecture. An explicitly selected foreign target additionally requires the matching QEMU user-mode executable (for example, `qemu-aarch64` or `qemu-aarch64-static`) in `PATH` to run the root tests.
 
-The command runs `cargo fmt --check`, root Check/Clippy/tests with `--locked`, separate Check/Clippy/tests for `xtask`, `cargo xtask update-checksums --check`, and `git diff --check` in sequence. It stops at the first failure. The checksum step validates all pinned helper sources and Zig metadata. It uses the network only for missing, mismatched, or stale cache entries; a fully populated verified cache works offline.
+The command runs `cargo fmt --check`, root Check/Clippy/tests with `--locked`, every release-derived feature combination, the two network-backed upstream helper integration tests once explicitly, separate Check/Clippy/tests for `xtask`, a native release runtime build, the Rust end-to-end lifecycle harness, `cargo xtask update-checksums --check`, and `git diff --check` in sequence. The upstream tests remain `#[ignore]` during repeated feature-matrix passes so they are not rerun for every feature set; their explicit invocation downloads only missing or invalid assets and validates source checksums, decoded payload checksums, and ELF policy. The checksum step validates all pinned helper sources and Zig metadata. A fully populated verified cache works offline.
 
 If cross-linking changed, also build one foreign runtime:
 
@@ -111,7 +128,7 @@ QEMU is needed only for the smoke test of the finished foreign ELF. It does not 
 
 ## 4. Commit every reproducible input
 
-Confirm that Git sees the source files, CI scripts, manifests, and both lockfiles, but not build/cache directories:
+Confirm that Git sees the source files, Rust `xtask` CI/release modules, manifests, `CHANGELOG.md`, `RELEASE_NOTES.md`, documentation, fixtures, and both lockfiles, but not build/cache directories:
 
 ```sh
 git status --short --untracked-files=all
@@ -127,7 +144,7 @@ After checking, create the commit. For example:
 ```sh
 git add -A
 git diff --cached --check
-git commit -m "Release v0.7.1"
+git commit -m "Release vX.X.X"
 ```
 
 Do not use `git add -f` for files under `dist/`, `target/`, `assets-*`, or `release-dist/`.
@@ -171,8 +188,8 @@ grep '^version = ' Cargo.toml
 Create and push an annotated tag:
 
 ```sh
-git tag -a v0.7.1 -m "uruntime v0.7.1"
-git push origin v0.7.1
+git tag -a vX.X.X -m "uruntime vX.X.X"
+git push origin vX.X.X
 ```
 
 The tag-push workflow rebuilds 54 files from the tagged commit. The release job:
@@ -204,24 +221,24 @@ CI rebuilds the tagged commit and safely replaces the release assets through the
 Move the local annotated tag and push the tag update itself:
 
 ```sh
-git tag -fa v0.7.1 -m "uruntime v0.7.1" <NEW_COMMIT>
-git push --force origin refs/tags/v0.7.1
+git tag -fa vX.X.X -m "uruntime vX.X.X" <NEW_COMMIT>
+git push --force origin refs/tags/vX.X.X
 ```
 
 The force-push creates a new tag-push workflow with a new `github.sha`. Do not rerun the old workflow for the previous commit: its SHA check must fail after the tag moves.
 
-Moving a published tag breaks users', package managers', and caches' expectation that releases are immutable. Do this only for a deliberate release correction. For a normal fix, prefer a new version number such as `v0.7.2`.
+Moving a published tag breaks users', package managers', and caches' expectation that releases are immutable. Do this only for a deliberate release correction. For a normal fix, publish a new version instead.
 
 ## 8. Verify the published release
 
 ```sh
-release_id=$(gh api repos/VHSgunzo/uruntime/releases/tags/v0.7.1 --jq .id)
+release_id=$(gh api repos/VHSgunzo/uruntime/releases/tags/vX.X.X --jq .id)
 
 gh api --paginate --slurp \
   "repos/VHSgunzo/uruntime/releases/$release_id/assets?per_page=100" \
   --jq 'add | length'
 
-gh release view v0.7.1
+gh release view vX.X.X
 ```
 
 The expected asset count is `54`. CI performs the same check automatically and publishes the release only after the complete manifest matches.

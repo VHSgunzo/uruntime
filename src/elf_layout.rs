@@ -241,4 +241,12 @@ pub(crate) fn read_elf_prefix<R: Read>(reader: &mut R, file_len: u64) -> Result<
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::unreachable,
+    clippy::unwrap_used
+)]
 pub(crate) mod tests;

@@ -9,10 +9,7 @@
 /xtask/target/
 
 /.vscode/
-/.ruff_cache/
-/.pytest_cache/
-__pycache__/
-*.py[cod]
+/.hermes/
 
 /release.json
 /release-assets.json

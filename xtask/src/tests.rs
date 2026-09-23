@@ -119,26 +119,206 @@ fn check_command_defaults_to_the_current_platform_musl_target() {
     assert!(default_check_target("windows", "x86_64", false).is_err());
 }
 
+fn expected_release_test_commands(target: &str) -> Vec<Vec<String>> {
+    [
+        (false, None),
+        (true, Some("squashfs")),
+        (true, Some("dwarfs")),
+        (false, Some("appimage")),
+        (false, Some("appimage,lite")),
+        (true, Some("appimage,squashfs")),
+        (true, Some("appimage,squashfs,lite")),
+        (true, Some("appimage,dwarfs")),
+        (true, Some("appimage,dwarfs,lite")),
+    ]
+    .into_iter()
+    .map(|(no_default, features)| {
+        let mut command = vec!["test", "--locked", "--workspace"];
+        if no_default {
+            command.push("--no-default-features");
+        }
+        if let Some(features) = features {
+            command.extend(["--features", features]);
+        }
+        command.extend(["--target", target]);
+        command.into_iter().map(str::to_string).collect()
+    })
+    .collect()
+}
+
 #[test]
-fn check_command_contains_all_local_quality_gates() {
-    let commands = check_commands("x86_64-unknown-linux-musl");
-    assert_eq!(commands.len(), 7);
-    let rendered = commands
-        .iter()
-        .map(|command| command.join(" "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    for required in [
-        "fmt --check",
-        "check --locked --workspace --all-features --target x86_64-unknown-linux-musl",
-        "clippy --locked --workspace --all-features --all-targets --target x86_64-unknown-linux-musl -- -D warnings",
-        "test --locked --workspace --all-features --target x86_64-unknown-linux-musl",
-        "check --locked --manifest-path xtask/Cargo.toml",
-        "clippy --locked --manifest-path xtask/Cargo.toml --all-targets -- -D warnings",
-        "test --locked --manifest-path xtask/Cargo.toml",
-    ] {
-        assert!(rendered.contains(required), "missing `{required}` in:\n{rendered}");
+fn release_variant_tests_match_the_independent_public_feature_contract() {
+    let target = "x86_64-unknown-linux-musl";
+    assert_eq!(
+        release_variant_test_commands(target),
+        expected_release_test_commands(target)
+    );
+}
+
+#[test]
+fn check_command_is_the_exact_structured_local_quality_gate() {
+    let target = "x86_64-unknown-linux-musl";
+    let strings = |args: &[&str]| {
+        args.iter()
+            .map(|arg| (*arg).to_string())
+            .collect::<Vec<_>>()
+    };
+    let mut expected = vec![
+        strings(&["fmt", "--check"]),
+        strings(&[
+            "check",
+            "--locked",
+            "--workspace",
+            "--all-features",
+            "--target",
+            target,
+        ]),
+        strings(&[
+            "clippy",
+            "--locked",
+            "--workspace",
+            "--all-features",
+            "--all-targets",
+            "--target",
+            target,
+            "--",
+            "-D",
+            "warnings",
+        ]),
+        strings(&[
+            "test",
+            "--locked",
+            "--workspace",
+            "--all-features",
+            "--target",
+            target,
+        ]),
+        strings(&[
+            "test",
+            "--locked",
+            "--workspace",
+            "--all-features",
+            "--test",
+            "build_support_tests",
+            "--target",
+            target,
+            "--",
+            "--ignored",
+            "--nocapture",
+        ]),
+    ];
+    expected.extend(expected_release_test_commands(target));
+    expected.extend([
+        strings(&["fmt", "--check", "--manifest-path", "xtask/Cargo.toml"]),
+        strings(&["check", "--locked", "--manifest-path", "xtask/Cargo.toml"]),
+        strings(&[
+            "clippy",
+            "--locked",
+            "--manifest-path",
+            "xtask/Cargo.toml",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]),
+        strings(&["test", "--locked", "--manifest-path", "xtask/Cargo.toml"]),
+    ]);
+    assert_eq!(check_commands(target), expected);
+}
+
+#[test]
+fn foreign_aarch64_debug_checks_and_tests_use_target_specific_cflags() {
+    let aarch64 = arch_by_name("aarch64").unwrap();
+    let expected = Some(("CFLAGS_aarch64_unknown_linux_musl".to_string(), "-O1"));
+    let cases = [
+        (
+            "check",
+            vec!["check", "--target", aarch64.rust_target],
+            true,
+        ),
+        ("test", vec!["test", "--target", aarch64.rust_target], true),
+        (
+            "global flag before check",
+            vec!["--verbose", "check", "--target", aarch64.rust_target],
+            true,
+        ),
+        (
+            "global option before test",
+            vec!["--color", "always", "test", "--target", aarch64.rust_target],
+            true,
+        ),
+        (
+            "global option value named test before clippy",
+            vec![
+                "--config",
+                "test",
+                "clippy",
+                "--target",
+                aarch64.rust_target,
+            ],
+            false,
+        ),
+        (
+            "release flag",
+            vec!["check", "--target", aarch64.rust_target, "--release"],
+            false,
+        ),
+        (
+            "release profile pair",
+            vec![
+                "test",
+                "--target",
+                aarch64.rust_target,
+                "--profile",
+                "release",
+            ],
+            false,
+        ),
+        (
+            "release profile assignment",
+            vec![
+                "check",
+                "--target",
+                aarch64.rust_target,
+                "--profile=release",
+            ],
+            false,
+        ),
+        (
+            "non-release profile",
+            vec!["test", "--target", aarch64.rust_target, "--profile", "dev"],
+            true,
+        ),
+        (
+            "clippy",
+            vec!["clippy", "--target", aarch64.rust_target],
+            false,
+        ),
+        ("untargeted check", vec!["check"], false),
+    ];
+
+    for (name, args, enabled) in cases {
+        let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+        assert_eq!(
+            check_command_cflags(&args, aarch64, true),
+            enabled.then(|| expected.clone()).flatten(),
+            "{name}"
+        );
     }
+
+    let check = ["check", "--target", aarch64.rust_target]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+    assert_eq!(check_command_cflags(&check, aarch64, false), None);
+    assert_eq!(
+        check_command_cflags(&check, arch_by_name("x86_64").unwrap(), true),
+        None
+    );
+    assert_eq!(
+        check_command_cflags(&check, arch_by_name("riscv64").unwrap(), true),
+        None
+    );
 }
 
 #[test]
@@ -150,8 +330,11 @@ fn foreign_check_runners_match_every_supported_architecture() {
         ("powerpc64-unknown-linux-musl", "qemu-ppc64"),
         ("powerpc64le-unknown-linux-musl", "qemu-ppc64le"),
     ] {
-        let arch = ARCHES.iter().find(|arch| arch.rust_target == target).unwrap();
-        assert_eq!(qemu_runner_names(arch)[0], expected);
+        let arch = ARCHES
+            .iter()
+            .find(|arch| arch.rust_target == target)
+            .unwrap();
+        assert_eq!(qemu_runner_names(arch.artifact_name).unwrap()[0], expected);
     }
 }
 
@@ -190,33 +373,39 @@ fn root_checks_always_use_zig_but_native_tests_do_not_use_qemu() {
 }
 
 #[test]
-fn help_is_generated_from_the_same_tables() {
+fn help_lists_every_public_task_from_an_independent_contract() {
     let help = help_text();
-    for task in all_tasks() {
-        assert!(help.contains(&task.name), "missing {}", task.name);
+    for arch in [
+        "x86_64",
+        "aarch64",
+        "riscv64",
+        "loongarch64",
+        "ppc64",
+        "ppc64le",
+    ] {
+        for variant in [
+            "runimage",
+            "runimage-squashfs",
+            "runimage-dwarfs",
+            "appimage",
+            "appimage-lite",
+            "appimage-squashfs",
+            "appimage-squashfs-lite",
+            "appimage-dwarfs",
+            "appimage-dwarfs-lite",
+        ] {
+            let task = format!("{variant}-{arch}");
+            let occurrences = help
+                .lines()
+                .filter_map(|line| line.split_whitespace().next())
+                .filter(|listed| *listed == task)
+                .count();
+            assert_eq!(occurrences, 1, "public task {task}");
+        }
     }
     assert!(help.contains("Tasks (54):"));
     assert!(help.contains("cargo xtask check [RUST_TARGET]"));
     assert!(help.contains("cargo xtask update-checksums [--check]"));
-}
-
-#[test]
-fn target_identity_distinguishes_native_from_foreign_for_qemu() {
-    for arch in ARCHES {
-        assert_eq!(
-            target_is_foreign(&arch, "x86_64"),
-            arch.artifact_name != "x86_64"
-        );
-    }
-    assert!(target_is_foreign(
-        arch_by_name("x86_64").unwrap(),
-        "aarch64"
-    ));
-}
-
-#[test]
-fn release_builds_always_use_the_pinned_zig_linker() {
-    assert_eq!(BUILD_BACKEND, "cargo + Zig 0.16.0");
 }
 
 #[test]
@@ -292,7 +481,7 @@ fn zig_wrapper_maps_all_targets_and_filters_rust_gnu_only_link_args() {
     )
     .unwrap();
     fs::set_permissions(&fake_zig, fs::Permissions::from_mode(0o755)).unwrap();
-    let wrapper = project_root().join("scripts/zig-linker.sh");
+    let wrapper = ensure_zig_linker(&project_root()).unwrap();
     let rust_sysroot = root.join("rust-sysroot");
 
     for arch in ARCHES {
@@ -306,6 +495,7 @@ fn zig_wrapper_maps_all_targets_and_filters_rust_gnu_only_link_args() {
             .args([
                 format!("--target={}", arch.rust_target),
                 "-Wl,--fix-cortex-a53-843419".into(),
+                "-Wl,--no-rosegment".into(),
                 "-nostartfiles".into(),
                 rust_sysroot
                     .join("lib/rustlib")
@@ -344,6 +534,11 @@ fn zig_wrapper_maps_all_targets_and_filters_rust_gnu_only_link_args() {
         assert!(!actual
             .lines()
             .any(|line| line == "-Wl,--fix-cortex-a53-843419"));
+        assert_eq!(
+            actual.lines().any(|line| line == "-Wl,--no-rosegment"),
+            arch.artifact_name != "loongarch64",
+            "the Zig-incompatible LoongArch flag must be filtered only for LoongArch: {actual}"
+        );
         for forbidden in ["unknown-linux", "nostartfiles", "crt1.o", "-lc\n"] {
             assert!(
                 !actual.contains(forbidden),
@@ -516,14 +711,14 @@ fn helper_checksum_cache_uses_the_build_source_directory() {
         helper_source_cache_path(&project, &direct).unwrap(),
         project
             .join("assets-x86_64")
-            .join("squashfuse-0.6.3.r2")
+            .join(format!("squashfuse-{}", build_support::SQUASHFUSE_VERSION))
             .join("squashfuse")
     );
     assert_eq!(
         helper_source_cache_path(&project, &wrapper).unwrap(),
         project
             .join("assets-x86_64")
-            .join("dwarfs-0.15.7")
+            .join(format!("dwarfs-{}", build_support::DWARFS_VERSION))
             .join("dwarfs-universal-wrapper")
     );
 }

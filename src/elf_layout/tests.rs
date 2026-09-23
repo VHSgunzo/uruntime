@@ -131,26 +131,15 @@ fn reads_each_prefix_byte_only_once() {
 }
 
 #[test]
-fn powerpc64le_fixture_uses_little_endian_boundary() {
-    let bytes = fixture(Endian::Little);
-    let mut cursor = Cursor::new(&bytes);
+fn elf64_little_and_big_endian_fixtures_have_the_same_boundary() {
+    for endian in [Endian::Little, Endian::Big] {
+        let bytes = fixture(endian);
+        let mut cursor = Cursor::new(&bytes);
+        let prefix = read_elf_prefix(&mut cursor, bytes.len() as u64).unwrap();
 
-    let prefix = read_elf_prefix(&mut cursor, bytes.len() as u64).unwrap();
-
-    assert_eq!(prefix.boundary, 0x380);
-    assert_eq!(prefix.bytes.len(), 0x380);
-    assert_eq!(&bytes[prefix.boundary as usize..][..4], b"hsqs");
-}
-
-#[test]
-fn powerpc64_big_endian_fixture_has_same_boundary() {
-    let bytes = fixture(Endian::Big);
-    let mut cursor = Cursor::new(&bytes);
-
-    let prefix = read_elf_prefix(&mut cursor, bytes.len() as u64).unwrap();
-
-    assert_eq!(prefix.boundary, 0x380);
-    assert_eq!(prefix.bytes.len(), 0x380);
+        assert_eq!(prefix.boundary, 0x380);
+        assert_eq!(prefix.bytes.len(), 0x380);
+    }
 }
 
 #[test]

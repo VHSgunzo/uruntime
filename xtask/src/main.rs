@@ -4,10 +4,13 @@ use std::{
     fs::{self, create_dir_all, File, OpenOptions},
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{exit, Command, Stdio},
+    process::{exit, Child, Command, Stdio},
 };
 
 use fs2::FileExt;
+
+mod artifacts;
+mod lifecycle;
 
 #[path = "../../build_support.rs"]
 pub mod build_support;
@@ -17,6 +20,14 @@ use build_support::{
 };
 
 const BIN_NAME: &str = "uruntime";
+
+fn terminate_process_group(child: &mut Child) {
+    let process_group = -(child.id() as i32);
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
 
 fn zig_download_url(platform: &str) -> String {
     format!("{ZIG_DOWNLOAD_BASE}/{ZIG_VERSION}/zig-{platform}-{ZIG_VERSION}.tar.xz")
@@ -279,8 +290,6 @@ impl Task {
     }
 }
 
-const BUILD_BACKEND: &str = "cargo + Zig 0.16.0";
-
 fn arch_by_name(name: &str) -> Option<&'static Arch> {
     ARCHES.iter().find(|arch| arch.artifact_name == name)
 }
@@ -377,8 +386,34 @@ fn default_check_target(os: &str, arch: &str, little_endian: bool) -> Result<&'s
     }
 }
 
+fn release_variant_test_commands(target: &str) -> Vec<Vec<String>> {
+    let mut seen = Vec::<(bool, String)>::new();
+    let mut commands = Vec::new();
+    for variant in VARIANTS {
+        let features = variant.features_arg().unwrap_or_default();
+        let key = (variant.no_default_features, features.clone());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+
+        let mut command = vec!["test".into(), "--locked".into(), "--workspace".into()];
+        if variant.no_default_features {
+            command.push("--no-default-features".into());
+        }
+        if !features.is_empty() {
+            command.push("--features".into());
+            command.push(features);
+        }
+        command.push("--target".into());
+        command.push(target.into());
+        commands.push(command);
+    }
+    commands
+}
+
 fn check_commands(target: &str) -> Vec<Vec<String>> {
-    vec![
+    let mut commands = vec![
         vec!["fmt".into(), "--check".into()],
         vec![
             "check".into(),
@@ -409,6 +444,28 @@ fn check_commands(target: &str) -> Vec<Vec<String>> {
             target.into(),
         ],
         vec![
+            "test".into(),
+            "--locked".into(),
+            "--workspace".into(),
+            "--all-features".into(),
+            "--test".into(),
+            "build_support_tests".into(),
+            "--target".into(),
+            target.into(),
+            "--".into(),
+            "--ignored".into(),
+            "--nocapture".into(),
+        ],
+    ];
+    commands.extend(release_variant_test_commands(target));
+    commands.extend([
+        vec![
+            "fmt".into(),
+            "--check".into(),
+            "--manifest-path".into(),
+            "xtask/Cargo.toml".into(),
+        ],
+        vec![
             "check".into(),
             "--locked".into(),
             "--manifest-path".into(),
@@ -430,7 +487,8 @@ fn check_commands(target: &str) -> Vec<Vec<String>> {
             "--manifest-path".into(),
             "xtask/Cargo.toml".into(),
         ],
-    ]
+    ]);
+    commands
 }
 
 fn run_status(program: &str, args: &[String]) -> Result<(), DynError> {
@@ -446,22 +504,22 @@ fn run_status(program: &str, args: &[String]) -> Result<(), DynError> {
     }
 }
 
-fn qemu_runner_names(arch: &Arch) -> [String; 2] {
-    let name = match arch.artifact_name {
+fn qemu_runner_names(artifact_arch: &str) -> Result<[String; 2], String> {
+    let name = match artifact_arch {
         "x86_64" => "qemu-x86_64",
         "aarch64" => "qemu-aarch64",
         "riscv64" => "qemu-riscv64",
         "loongarch64" => "qemu-loongarch64",
         "ppc64" => "qemu-ppc64",
         "ppc64le" => "qemu-ppc64le",
-        _ => unreachable!("all check targets come from ARCHES"),
+        other => return Err(format!("unsupported QEMU artifact architecture `{other}`")),
     };
-    [name.to_string(), format!("{name}-static")]
+    Ok([name.to_string(), format!("{name}-static")])
 }
 
 fn configure_target_runner(command: &mut Command, arch: &Arch) -> Result<(), DynError> {
     let project = project_root();
-    let names = qemu_runner_names(arch);
+    let names = qemu_runner_names(arch.artifact_name)?;
     let runner = names
         .iter()
         .find_map(|name| resolve_program(Path::new(name), &project).ok())
@@ -475,16 +533,57 @@ fn configure_target_runner(command: &mut Command, arch: &Arch) -> Result<(), Dyn
         target_env_key("CARGO_TARGET", arch.rust_target, "_RUNNER"),
         runner,
     );
+    command.env("URUNTIME_FOREIGN_TEST_RUNNER", "qemu-user");
     Ok(())
 }
 
 fn check_command_requirements(args: &[String], foreign: bool) -> (bool, bool) {
     let targets_root_package = args.iter().any(|arg| arg == "--target");
     let uses_zig = targets_root_package;
-    let uses_runner = foreign
-        && targets_root_package
-        && args.first().is_some_and(|arg| arg == "test");
+    let uses_runner =
+        foreign && targets_root_package && args.first().is_some_and(|arg| arg == "test");
     (uses_zig, uses_runner)
+}
+
+fn cargo_subcommand(args: &[String]) -> Option<&str> {
+    let mut args = args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        match arg {
+            "--color" | "--config" | "-C" | "-Z" => {
+                args.next()?;
+            }
+            arg if arg.starts_with("--color=") || arg.starts_with("--config=") => {}
+            arg if arg.starts_with("-C") || arg.starts_with("-Z") => {}
+            arg if arg.starts_with('-') => {}
+            subcommand => return Some(subcommand),
+        }
+    }
+    None
+}
+
+fn check_command_cflags(
+    args: &[String],
+    arch: &Arch,
+    foreign: bool,
+) -> Option<(String, &'static str)> {
+    let debug_cargo_command = matches!(cargo_subcommand(args), Some("check" | "test"));
+    let release_profile = args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--release" | "--profile=release"))
+        || args
+            .windows(2)
+            .any(|args| args[0] == "--profile" && args[1] == "release");
+    (foreign
+        && arch.rust_target == "aarch64-unknown-linux-musl"
+        && debug_cargo_command
+        && !release_profile
+        && args.iter().any(|arg| arg == "--target"))
+    .then(|| {
+        (
+            format!("CFLAGS_{}", arch.rust_target.replace('-', "_")),
+            "-O1",
+        )
+    })
 }
 
 fn run_check_command(args: &[String], arch: &Arch, foreign: bool) -> Result<(), DynError> {
@@ -497,6 +596,9 @@ fn run_check_command(args: &[String], arch: &Arch, foreign: bool) -> Result<(), 
         if uses_runner {
             configure_target_runner(&mut command, arch)?;
         }
+    }
+    if let Some((key, value)) = check_command_cflags(args, arch, foreign) {
+        command.env(key, value);
     }
     let status = command.status()?;
     if status.success() {
@@ -516,12 +618,41 @@ fn run_checks(target: &str) -> Result<(), DynError> {
             )
         })?;
     let foreign = target_is_foreign(arch, host_artifact_arch());
-    eprintln!(
-        "running local checks for Rust target {target}, backend={}",
-        BUILD_BACKEND
-    );
+    eprintln!("running local checks for Rust target {target}, backend=cargo + Zig {ZIG_VERSION}");
     for args in check_commands(target) {
         run_check_command(&args, arch, foreign)?;
+    }
+    if foreign {
+        eprintln!(
+            "NOT RUN end-to-end lifecycle harness for foreign target {target}: native namespace and FUSE execution is required"
+        );
+    } else {
+        let lifecycle_build = vec![
+            "build".into(),
+            "--locked".into(),
+            "--release".into(),
+            "--target".into(),
+            target.into(),
+            "--no-default-features".into(),
+            "--features".into(),
+            "appimage,squashfs,dwarfs".into(),
+        ];
+        run_check_command(&lifecycle_build, arch, false)?;
+        let runtime = project_root()
+            .join("target")
+            .join(target)
+            .join("release")
+            .join(BIN_NAME);
+        lifecycle::fixture_command(&[
+            "--runtime".into(),
+            runtime.to_string_lossy().into_owned(),
+            "--output".into(),
+            project_root().join("tests").to_string_lossy().into_owned(),
+            "--target".into(),
+            target.into(),
+            "--check".into(),
+        ])?;
+        lifecycle::run_lifecycle(&runtime, target, lifecycle::FuseMode::Auto)?;
     }
     eprintln!("+ cargo xtask update-checksums --check");
     update_checksums(true)?;
@@ -960,9 +1091,7 @@ fn update_checksums(check: bool) -> Result<(), DynError> {
         let destination = helper_source_cache_path(&project, source)?;
         let expected = current_digests
             .iter()
-            .find(|record| {
-                record.arch == source.target.release_arch && record.name == source.name
-            })
+            .find(|record| record.arch == source.target.release_arch && record.name == source.name)
             .map(|record| record.source_sha256.as_str());
         with_cache_lock(&destination, || {
             if let Some(bytes) = read_verified_cached_helper_source(&destination, expected)? {
@@ -999,7 +1128,10 @@ fn update_checksums(check: bool) -> Result<(), DynError> {
                 zig_index_path.display()
             );
         } else {
-            eprintln!("cache miss for {}; downloading it", zig_index_path.display());
+            eprintln!(
+                "cache miss for {}; downloading it",
+                zig_index_path.display()
+            );
         }
         build_support::download_atomic(&curl, ZIG_INDEX_URL, &zig_index_path)?;
         read_cached_helper_source(&zig_index_path)?.ok_or_else(|| {
@@ -1073,6 +1205,19 @@ fn try_main() -> Result<(), DynError> {
         };
     }
 
+    if args.first().map(String::as_str) == Some("lifecycle") {
+        let (runtime, target, fuse) = lifecycle::parse_lifecycle_args(&args[1..])?;
+        return lifecycle::run_lifecycle(&runtime, &target, fuse);
+    }
+
+    if args.first().map(String::as_str) == Some("fixtures") {
+        return lifecycle::fixture_command(&args[1..]);
+    }
+
+    if args.first().map(String::as_str) == Some("artifacts") {
+        return artifacts::command(&args[1..]);
+    }
+
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     for task in select_tasks(&arg_refs).map_err(|error| -> DynError { error.into() })? {
         build(&task)?;
@@ -1082,7 +1227,7 @@ fn try_main() -> Result<(), DynError> {
 
 fn help_text() -> String {
     let mut text = String::from(
-        "Usage:\n  cargo xtask <task|architecture|all>\n  cargo xtask check [RUST_TARGET]\n  cargo xtask update-checksums [--check]\n\nArchitectures:\n",
+        "Usage:\n  cargo xtask <task|architecture|all>\n  cargo xtask check [RUST_TARGET]\n  cargo xtask lifecycle --runtime PATH [--target RUST_TARGET] [--fuse=auto|required|skip]\n  cargo xtask fixtures --runtime PATH [--output DIR] [--target RUST_TARGET] [--check]\n  cargo xtask artifacts <validate-arch|aggregate-release|validate-release|release-id|asset-ids> ...\n  cargo xtask update-checksums [--check]\n\nArchitectures:\n",
     );
     for arch in ARCHES {
         text.push_str(&format!(
@@ -1190,11 +1335,46 @@ fn query_rust_sysroot(project: &Path, compiler: &OsStr) -> Result<String, DynErr
     Ok(std::str::from_utf8(&output.stdout)?.trim().to_string())
 }
 
+fn ensure_zig_linker(project: &Path) -> Result<PathBuf, DynError> {
+    let source = project.join("xtask/src/zig_linker.rs");
+    require_tool(&source, "Rust Zig linker source")?;
+    let directory = project.join("target/toolchains");
+    create_dir_all(&directory)?;
+    let destination = directory.join("uruntime-zig-linker");
+    let current = destination.metadata().and_then(|destination_metadata| {
+        let source_modified = source.metadata()?.modified()?;
+        let destination_modified = destination_metadata.modified()?;
+        Ok(destination_metadata.is_file() && destination_modified >= source_modified)
+    });
+    if current.unwrap_or(false) {
+        return Ok(destination);
+    }
+
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let rustc = resolve_program(Path::new(&rustc), project)?;
+    let temporary = tempfile::NamedTempFile::new_in(&directory)?;
+    let status = Command::new(rustc)
+        .current_dir(project)
+        .args(["--edition=2021", "-C", "opt-level=2", "-o"])
+        .arg(temporary.path())
+        .arg(&source)
+        .status()?;
+    if !status.success() {
+        return Err("failed to compile the Rust Zig linker wrapper".into());
+    }
+    temporary.as_file().sync_all()?;
+    if destination.exists() {
+        fs::remove_file(&destination)?;
+    }
+    temporary.persist(&destination)?;
+    File::open(&directory)?.sync_all()?;
+    Ok(destination)
+}
+
 fn configure_zig(command: &mut Command, arch: &Arch) -> Result<(), DynError> {
     let zig = ensure_zig()?;
     let project = project_root();
-    let wrapper = project.join("scripts/zig-linker.sh");
-    require_tool(&wrapper, "project Zig linker wrapper")?;
+    let wrapper = ensure_zig_linker(&project)?;
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let rust_sysroot = query_rust_sysroot(&project, &rustc)?;
     command
@@ -1220,11 +1400,10 @@ fn configure_zig(command: &mut Command, arch: &Arch) -> Result<(), DynError> {
 fn build(task: &Task) -> Result<(), DynError> {
     create_dist_dir()?;
     eprintln!(
-        "building {}: artifact arch={}, Rust target={}, backend={}",
+        "building {}: artifact arch={}, Rust target={}, backend=cargo + Zig {ZIG_VERSION}",
         task.name,
         task.arch().artifact_name,
-        task.arch().rust_target,
-        BUILD_BACKEND
+        task.arch().rust_target
     );
 
     let mut command = Command::new("cargo");
@@ -1266,3 +1445,6 @@ fn sections_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod workflow_contract;
