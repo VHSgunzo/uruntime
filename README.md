@@ -99,18 +99,31 @@ See [Building uruntime](docs/BUILDING.md) for prerequisites, targets, toolchains
 
 ## Projects using uruntime
 
-- [AnyLinux-AppImages](https://github.com/pkgforge-dev/Anylinux-AppImages)
-- [CPU-X](https://github.com/TheTumultuousUnicornOfDarkness/CPU-X)
-- [Converseen](https://github.com/Faster3ck/Converseen)
-- [Eden](https://git.eden-emu.dev/eden-emu/eden)
-- [Ghostty AppImage](https://github.com/pkgforge-dev/ghostty-appimage)
-- [GOverlay](https://github.com/benjamimgois/goverlay)
-- [Interstellar](https://github.com/interstellar-app/interstellar)
-- [MangoJuice](https://github.com/radiolamp/mangojuice)
-- [PPSSPP](https://github.com/hrydgard/ppsspp)
-- [QDiskInfo](https://github.com/edisionnano/QDiskInfo)
-- [RPCS3](https://github.com/RPCS3/rpcs3)
-- [RSS Guard](https://github.com/martinrotter/rssguard)
+- [AnyLinux-AppImages](https://github.com/pkgforge-dev/Anylinux-AppImages) — a
+  collection of AppImage build scripts for many Linux applications.
+- [appimagetool](https://github.com/pkgforge-dev/appimagetool) — a Rust
+  AppImage builder that packages AppDirs as DwarFS images with uruntime,
+  including pinned runtime resolution and ELF section configuration.
+- [CPU-X](https://github.com/TheTumultuousUnicornOfDarkness/CPU-X) — a system
+  information and hardware monitoring application.
+- [Converseen](https://github.com/Faster3ck/Converseen) — a batch image
+  conversion and resizing application.
+- [Eden](https://git.eden-emu.dev/eden-emu/eden) — a Nintendo Switch emulator.
+- [Ghostty AppImage](https://github.com/pkgforge-dev/ghostty-appimage) — a
+  portable AppImage build of the Ghostty terminal.
+- [GOverlay](https://github.com/benjamimgois/goverlay) — a graphical
+  configurator for MangoHud, vkBasalt, and related gaming tools.
+- [Interstellar](https://github.com/interstellar-app/interstellar) — a client
+  for Mbin, Lemmy, and PieFed.
+- [MangoJuice](https://github.com/radiolamp/mangojuice) — a graphical
+  configuration tool for MangoHud.
+- [PPSSPP](https://github.com/hrydgard/ppsspp) — a PlayStation Portable
+  emulator.
+- [QDiskInfo](https://github.com/edisionnano/QDiskInfo) — a graphical frontend
+  for `smartctl` and drive SMART data.
+- [RPCS3](https://github.com/RPCS3/rpcs3) — a PlayStation 3 emulator.
+- [RSS Guard](https://github.com/martinrotter/rssguard) — a desktop client for
+  RSS, Atom, and other feed formats.
 
 ## Documentation
 
