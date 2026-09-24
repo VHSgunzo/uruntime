@@ -407,6 +407,200 @@ fn log_file(path: &Path) -> Result<Stdio, DynError> {
     Ok(Stdio::from(File::create(path)?))
 }
 
+fn verify_no_fuse_automatic_extraction_fallback(
+    bwrap: &Path,
+    image: &Path,
+    filesystem: &str,
+) -> Result<(), DynError> {
+    for launch in ["first", "second"] {
+        let result = bounded_command(
+            Command::new(bwrap)
+                .args([
+                    "--tmpfs",
+                    "/",
+                    "--dev",
+                    "/dev",
+                    "--cap-add",
+                    "ALL",
+                    "--ro-bind",
+                ])
+                .arg(image)
+                .arg("/image.AppImage")
+                .args(["--clearenv", "--setenv", "PATH", "/usr/bin:/bin"])
+                .args(["--setenv", "REUSE_CHECK_DELAY", "1s"])
+                .args(["/image.AppImage", "fixture-image-test"]),
+            &format!("{launch} {filesystem} no-FUSE automatic extraction fallback"),
+        )?;
+        if !result.status.success() {
+            return Err(format!(
+                "{launch} {filesystem} no-FUSE automatic extraction fallback failed with {}: {}",
+                result.status,
+                String::from_utf8_lossy(&result.stderr).trim()
+            )
+            .into());
+        }
+        let launched = String::from_utf8(result.stdout)?;
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        if stderr.contains("failed to detach application supervisor streams") {
+            return Err(format!(
+                "{launch} {filesystem} no-FUSE fallback could not detach supervisor streams"
+            )
+            .into());
+        }
+        for expected in ["fixture=uruntime-apprun-v1", "argv.1=fixture-image-test"] {
+            if !launched.lines().any(|line| line == expected) {
+                return Err(
+                    format!("{launch} {filesystem} no-FUSE fallback omitted `{expected}`").into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_no_fuse_fixed_target_fallback(
+    bwrap: &Path,
+    image: &Path,
+    state: &Path,
+    filesystem: &str,
+) -> Result<(), DynError> {
+    let target = state.join("fixed-target");
+    let result = bounded_command(
+        Command::new(bwrap)
+            .args(["--tmpfs", "/", "--dev", "/dev", "--cap-add", "ALL"])
+            .args(["--ro-bind"])
+            .arg(image)
+            .arg("/image.AppImage")
+            .args(["--bind"])
+            .arg(state)
+            .arg("/state")
+            .args(["--clearenv", "--setenv", "PATH", "/usr/bin:/bin"])
+            .args(["--setenv", "APPIMAGE_TARGET_DIR", "/state/fixed-target/"])
+            .args(["--setenv", "NO_CLEANUP", "1"])
+            .args(["/image.AppImage", "fixture-image-test"]),
+        &format!("{filesystem} no-FUSE fixed-target extraction fallback"),
+    )?;
+    if !result.status.success() {
+        return Err(format!(
+            "{filesystem} no-FUSE fixed-target fallback failed with {}: {}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr).trim()
+        )
+        .into());
+    }
+    let launched = String::from_utf8(result.stdout)?;
+    if !launched
+        .lines()
+        .any(|line| line == "fixture=uruntime-apprun-v1")
+        || !target.join("AppRun").is_file()
+        || !state.join("fixed-target.lock").is_file()
+        || target.join(".lock").exists()
+    {
+        return Err(format!(
+            "{filesystem} no-FUSE fallback did not preserve its normalized fixed target"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn verify_no_dev_automatic_extraction_fallback(
+    bwrap: &Path,
+    image: &Path,
+    filesystem: &str,
+) -> Result<(), DynError> {
+    let result = bounded_command(
+        Command::new(bwrap)
+            .args(["--tmpfs", "/", "--ro-bind"])
+            .arg(image)
+            .arg("/image.AppImage")
+            .args(["--clearenv", "--setenv", "PATH", "/usr/bin:/bin"])
+            .args(["/image.AppImage", "fixture-image-test"]),
+        &format!("{filesystem} no-/dev automatic extraction fallback"),
+    )?;
+    if !result.status.success() {
+        return Err(format!(
+            "{filesystem} no-/dev automatic extraction fallback failed with {}: {}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr).trim()
+        )
+        .into());
+    }
+    let launched = String::from_utf8(result.stdout)?;
+    for expected in ["fixture=uruntime-apprun-v1", "argv.1=fixture-image-test"] {
+        if !launched.lines().any(|line| line == expected) {
+            return Err(format!("{filesystem} no-/dev fallback omitted `{expected}`").into());
+        }
+    }
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    if stderr.contains("failed to detach application supervisor streams") {
+        return Err(
+            format!("{filesystem} no-/dev fallback could not detach supervisor streams").into(),
+        );
+    }
+    Ok(())
+}
+
+fn verify_uid_map_only_proc_uses_no_proc_direct_mount(
+    bwrap: &Path,
+    image: &Path,
+    state: &Path,
+    filesystem: &str,
+) -> Result<(), DynError> {
+    fs::create_dir_all(state.join("tmp"))?;
+    let uid_map = state.join("uid_map");
+    fs::write(&uid_map, b"0 0 4294967295\n")?;
+    let log = state.join("uid-map-only.log");
+    let mut child = Command::new(bwrap);
+    child
+        .args(["--tmpfs", "/", "--dev-bind", "/dev", "/dev"])
+        .args(["--cap-add", "ALL", "--ro-bind"])
+        .arg(image)
+        .arg("/image.AppImage")
+        .args(["--bind"])
+        .arg(state)
+        .arg("/state")
+        .args(["--dir", "/proc", "--dir", "/proc/self", "--ro-bind"])
+        .arg(&uid_map)
+        .arg("/proc/self/uid_map")
+        .args(["--clearenv", "--setenv", "PATH", "/usr/bin:/bin"])
+        .args(["--setenv", "TMPDIR", "/state/tmp"])
+        .args(["--setenv", "URUNTIME_FIXTURE_OUTPUT", "/state"])
+        .args(["--setenv", "REUSE_CHECK_DELAY", "200ms"])
+        .args([
+            "/image.AppImage",
+            "--fixture-scenario",
+            "hold",
+            "uid-map-only",
+            SCENARIO_TIMEOUT_MS,
+        ])
+        .stdout(log_file(&log)?)
+        .stderr(Stdio::from(File::options().append(true).open(&log)?));
+    eprintln!("+ {filesystem} uid-map-only procfs direct mount");
+    let mut child = child.spawn()?;
+    let ready = wait_file_from_child(
+        &state.join("uid-map-only.ready"),
+        "uid-map-only ready marker",
+        &mut child,
+        &log,
+    )?;
+    let target = target_from_result(state, &ready)?;
+    if !target
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().contains(".mount_"))
+    {
+        return Err(format!(
+            "{filesystem} uid-map-only procfs launch used extraction instead of direct FUSE: {}",
+            target.display()
+        )
+        .into());
+    }
+    File::create(state.join("uid-map-only.release"))?;
+    wait_child(&mut child, "uid-map-only launcher")?;
+    verify_result(&state.join("uid-map-only.result"), "uid-map-only result")?;
+    Ok(())
+}
+
 fn launch_no_proc(
     bwrap: &Path,
     image: &Path,
@@ -540,7 +734,7 @@ where
     wait_child(&mut second, "second overlapping launcher")?;
     verify_result(&state.join("second.result"), "second overlap result")?;
     wait_for(
-        || !second_target.exists() && !process_mounts(&second_target),
+        || !process_mounts(&second_target) && !second_target.exists(),
         "final overlapping target cleanup",
         WAIT_TIMEOUT,
     )?;
@@ -689,6 +883,15 @@ pub fn run_lifecycle(runtime: &Path, target: &str, fuse_mode: FuseMode) -> Resul
         let image = root.path().join(format!("lifecycle-{filesystem}.AppImage"));
         append_files(&image, runtime, &filesystem_image)?;
 
+        verify_no_fuse_automatic_extraction_fallback(&bwrap, &image, filesystem)?;
+        eprintln!("PASS {filesystem} empty-root no-FUSE automatic extraction fallback");
+        let state = root.path().join(format!("{filesystem}-fixed-target"));
+        fs::create_dir(&state)?;
+        verify_no_fuse_fixed_target_fallback(&bwrap, &image, &state, filesystem)?;
+        eprintln!("PASS {filesystem} no-FUSE fixed-target extraction fallback");
+        verify_no_dev_automatic_extraction_fallback(&bwrap, &image, filesystem)?;
+        eprintln!("PASS {filesystem} empty-root no-/dev supervisor detachment");
+
         let state = root.path().join(format!("{filesystem}-extract-overlap"));
         fs::create_dir(&state)?;
         run_overlap(
@@ -725,6 +928,10 @@ pub fn run_lifecycle(runtime: &Path, target: &str, fuse_mode: FuseMode) -> Resul
             (_, Ok(())) => {
                 let state = root.path().join(format!("{filesystem}-fuse-overlap"));
                 fs::create_dir(&state)?;
+                verify_uid_map_only_proc_uses_no_proc_direct_mount(
+                    &bwrap, &image, &state, filesystem,
+                )?;
+                eprintln!("PASS {filesystem} uid-map-only procfs direct FUSE launch");
                 run_overlap(filesystem, &image, &state, true, launch_fuse)?;
                 eprintln!("PASS {filesystem} current-namespace FUSE overlap");
             }

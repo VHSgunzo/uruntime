@@ -3,32 +3,33 @@ use super::{
     application_supervisor_required, atomic_publish_file_with, base_hash, can_mount_directly,
     classify_expire_mount_error, classify_ofd_lock_error, classify_target_directory,
     cleanup_exit_code, cleanup_observation_complete, create_lifetime_pipe,
-    direct_mount_is_fallback, direct_mount_setup_outcome, directory_nonempty_or_unsafe,
-    embedded_unshare_policy, enable_child_subreaper_with, environment_drop_caps_policy,
-    exec_self_fd_with, executable_path_from_auxv, existing_target_action,
-    extraction_cleanup_requires_descendant_visibility, failed_unshare_action,
-    fallback_should_drop_capabilities, fast_hash_file, finish_application_spawn,
-    finish_mount_namespace_outcome, format_mount_pid_record, fresh_mount_target, get_image,
-    get_runtime, get_section_data, is_runtime_option, mount_only_requires_procfs_notice,
-    namespace_diff_is_compatible, namespace_entry_outcome, open_optional_target_source,
-    parse_mount_pid_record, parse_proc_stat_starttime, parse_requested_mapping,
-    parse_reuse_check_delay, parse_unshare_cli_options, path_entry_present, plan_unshare,
-    prepare_fresh_target_transition_with, proc_free_direct_reuse_allowed,
-    proc_free_private_mount_requires_random_target, process_procfs_available_at,
-    read_process_starttime, read_supervisor_value, read_validated_mount_pid_file,
-    record_reusable_for_mapping, remove_runtime_separator, remove_tmp_dirs, requested_id_mapping,
-    reuse_hash_material, reuse_unavailable_action, should_drop_capabilities,
-    should_validate_direct_reuse_record, should_write_mount_pid_record, stale_removed_action,
-    try_acquire_ofd_cleanup_lease, try_expire_mount_with,
+    detach_supervisor_stdio_with, direct_mount_is_fallback, direct_mount_setup_outcome,
+    directory_nonempty_or_unsafe, embedded_unshare_policy, enable_child_subreaper_with,
+    environment_drop_caps_policy, exec_self_fd_with, executable_path_from_auxv,
+    existing_target_action, extraction_cleanup_requires_descendant_visibility,
+    failed_unshare_action, fallback_should_drop_capabilities, fast_hash_file,
+    finish_application_spawn, finish_mount_namespace_outcome, format_mount_pid_record,
+    fresh_mount_target, get_image, get_runtime, get_section_data, is_runtime_option,
+    mount_only_requires_procfs_notice, namespace_diff_is_compatible, namespace_entry_outcome,
+    open_optional_target_source, parse_mount_pid_record, parse_proc_stat_starttime,
+    parse_requested_mapping, parse_reuse_check_delay, parse_unshare_cli_options,
+    path_entry_present, plan_unshare, prepare_fresh_target_transition_with,
+    prepare_target_lock_parent_with, proc_free_private_mount_requires_random_target,
+    process_procfs_available_at, process_procfs_available_with, read_process_starttime,
+    read_supervisor_value, read_validated_mount_pid_file, record_reusable_for_mapping,
+    remove_runtime_separator, remove_tmp_dirs, requested_id_mapping,
+    reusable_mount_expiry_available, reuse_hash_material, reuse_unavailable_action,
+    should_drop_capabilities, should_validate_direct_reuse_record, should_write_mount_pid_record,
+    stale_removed_action, try_acquire_ofd_cleanup_lease, try_expire_mount_with,
     try_reuse_unshare_mount_point_for_mode_with,
     try_reuse_unshare_mount_point_for_mode_with_lock_hook, unshare_reuse_was_rejected,
-    wait_for_all_children, wait_for_lifetime_end, write_mount_pid_file, write_supervisor_value,
-    ApplicationState, CleanupExecution, CleanupWork, DirectMountSetupResult, ExistingTargetAction,
-    ExpireMountOutcome, ExpireMountResult, FailedUnshareAction, FileIdentity, IdMapping,
-    LifetimeLease, MountPidRecord, NamespaceEntryResult, NamespaceIdentities, NamespaceIdentity,
-    NamespaceKind, NamespaceOutcome, ReuseUnavailableAction, Runtime, SelfExecutable,
-    TargetDirectoryState, TryReuseResult, TryUnshareResult, UnshareCliOptions, UnsharePlan,
-    ARG_PFX,
+    visible_direct_reuse_allowed, wait_for_all_children, wait_for_lifetime_end,
+    write_mount_pid_file, write_supervisor_value, ApplicationState, CleanupExecution, CleanupWork,
+    DirectMountSetupResult, ExistingTargetAction, ExpireMountOutcome, ExpireMountResult,
+    FailedUnshareAction, FileIdentity, IdMapping, LifetimeLease, MountPidRecord,
+    NamespaceEntryResult, NamespaceIdentities, NamespaceIdentity, NamespaceKind, NamespaceOutcome,
+    ReuseUnavailableAction, Runtime, SelfExecutable, TargetDirectoryState, TryReuseResult,
+    TryUnshareResult, UnshareCliOptions, UnsharePlan, ARG_PFX,
 };
 use crate::elf_layout::tests::{fixture, Endian};
 use nix::libc;
@@ -1461,6 +1462,18 @@ fn target_coordination_and_record_publication_share_one_lock_inode() {
 }
 
 #[test]
+fn target_sidecar_paths_ignore_trailing_directory_separators() {
+    assert_eq!(
+        super::target_lock_path(std::path::Path::new("/cache/app/")),
+        std::path::PathBuf::from("/cache/app.lock")
+    );
+    assert_eq!(
+        super::target_lease_path(std::path::Path::new("/cache/app/")),
+        std::path::PathBuf::from("/cache/app.lease")
+    );
+}
+
+#[test]
 fn atomic_record_publication_cleans_temporary_file_after_failure() {
     let dir = tempfile::tempdir().unwrap();
     let record_path = dir.path().join("mount.pid");
@@ -1676,23 +1689,23 @@ fn unvalidated_persistent_mount_is_rejected_instead_of_remounted() {
 }
 
 #[test]
-fn automatic_visible_mount_can_be_reused_without_procfs_or_pid_records() {
-    assert!(proc_free_direct_reuse_allowed(
+fn automatic_visible_mount_can_be_reused_with_partial_procfs_and_without_pid_records() {
+    assert!(visible_direct_reuse_allowed(
         true, true, false, false, false, false, true
     ));
 }
 
 #[test]
-fn proc_free_direct_reuse_rejects_fixed_mapped_private_recorded_or_unmounted_targets() {
+fn visible_direct_reuse_rejects_fixed_mapped_private_recorded_or_unmounted_targets() {
     let baseline = [true, true, false, false, false, false, true];
     for index in [1_usize, 2, 3, 4, 5, 6] {
         let mut values = baseline;
         values[index] = !values[index];
         assert!(
-            !proc_free_direct_reuse_allowed(
+            !visible_direct_reuse_allowed(
                 values[0], values[1], values[2], values[3], values[4], values[5], values[6]
             ),
-            "condition {index} must prevent proc-free direct reuse"
+            "condition {index} must prevent visible direct reuse"
         );
     }
 }
@@ -1717,7 +1730,7 @@ fn proc_free_private_mount_reuse_switches_to_random_target() {
 }
 
 #[test]
-fn proc_free_direct_mount_does_not_publish_an_unverifiable_pid_record() {
+fn automatic_current_namespace_mount_does_not_publish_an_unnecessary_pid_record() {
     assert!(!should_write_mount_pid_record(
         true,
         Some(NamespaceKind::Current),
@@ -1801,7 +1814,14 @@ fn target_directory_classifier_treats_only_not_found_as_empty() {
 #[test]
 fn persistent_pid_record_is_validated_while_target_is_unmounted() {
     assert!(should_validate_direct_reuse_record(
-        true, false, false, false
+        true, false, false, false, true
+    ));
+}
+
+#[test]
+fn absent_pid_record_does_not_create_a_record_lock_sidecar() {
+    assert!(!should_validate_direct_reuse_record(
+        true, false, false, true, false
     ));
 }
 
@@ -2072,13 +2092,78 @@ fn unsupported_expiry_uses_regular_unmount_but_busy_or_failed_mounts_are_retaine
 }
 
 #[test]
-fn process_procfs_detection_rejects_an_empty_proc_directory() {
+fn process_procfs_detection_requires_readable_nonempty_stat() {
     let root = tempfile::tempdir().unwrap();
     assert!(!process_procfs_available_at(root.path()));
 
     std::fs::create_dir(root.path().join("self")).unwrap();
-    std::fs::write(root.path().join("self/stat"), b"fixture").unwrap();
+    let stat = root.path().join("self/stat");
+    std::fs::write(&stat, b"").unwrap();
+    assert!(!process_procfs_available_at(root.path()));
+
+    std::fs::write(&stat, b"fixture").unwrap();
     assert!(process_procfs_available_at(root.path()));
+    assert!(!process_procfs_available_with(root.path(), |_| {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    }));
+}
+
+#[test]
+fn existing_target_parent_is_not_recreated() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("mount-target");
+    let result = prepare_target_lock_parent_with(&target, |_| {
+        Err(std::io::Error::from_raw_os_error(libc::EACCES))
+    });
+
+    assert!(result.is_ok());
+}
+
+#[test]
+fn missing_dev_null_detach_keeps_standard_descriptors_occupied() {
+    if std::env::var_os("URUNTIME_STDIO_DETACH_WORKER").is_none() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "runtime_elf_tests::missing_dev_null_detach_keeps_standard_descriptors_occupied",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("URUNTIME_STDIO_DETACH_WORKER", "1");
+        let status = run_command_with_timeout(
+            &mut command,
+            Duration::from_secs(10),
+            "isolated stdio-detach worker",
+        )
+        .unwrap();
+        assert!(
+            status.success(),
+            "isolated stdio-detach worker failed: {status}"
+        );
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target");
+    unsafe {
+        libc::close(libc::STDIN_FILENO);
+    }
+    detach_supervisor_stdio_with(&root.path().join("missing-dev-null"), &target).unwrap();
+    for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        assert_ne!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    }
+    let mut probes = Vec::new();
+    for name in ["stdin-probe", "stdout-probe", "stderr-probe"] {
+        let file = File::create(root.path().join(name)).unwrap();
+        assert!(file.as_raw_fd() > libc::STDERR_FILENO);
+        probes.push(file);
+    }
+    eprintln!("detached supervisor diagnostic");
+    assert!(std::fs::read_dir(root.path()).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .contains(".stdio.")));
 }
 
 #[test]
@@ -2135,8 +2220,8 @@ fn application_supervisor_is_limited_to_extracted_runs() {
 }
 
 #[test]
-fn old_kernel_cleanup_uses_procfs_or_fails_safe_without_visibility() {
-    assert!(cleanup_observation_complete(true, false));
+fn extracted_cleanup_requires_subreaper_visibility_for_fd_closing_daemons() {
+    assert!(!cleanup_observation_complete(true, false));
     assert!(cleanup_observation_complete(false, true));
     assert!(!cleanup_observation_complete(false, false));
 
@@ -2160,6 +2245,14 @@ fn old_kernel_cleanup_uses_procfs_or_fails_safe_without_visibility() {
         true,
         true
     ));
+}
+
+#[test]
+fn reusable_mount_expiry_requires_a_privileged_unmount_path_when_procfs_exists() {
+    assert!(reusable_mount_expiry_available(false, false));
+    assert!(reusable_mount_expiry_available(false, true));
+    assert!(reusable_mount_expiry_available(true, true));
+    assert!(!reusable_mount_expiry_available(true, false));
 }
 
 #[test]

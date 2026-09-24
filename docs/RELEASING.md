@@ -157,7 +157,7 @@ The workflow runs when you push to the `action` branch:
 git push origin HEAD:action
 ```
 
-This run performs preflight, builds all six architectures, verifies nine files per architecture, and runs foreign runtimes through QEMU. It does not create a GitHub Release for the `action` branch.
+This run performs preflight, builds all six architectures, and verifies nine files per architecture. Foreign QEMU quality and smoke gates are currently retained as commented workflow steps because of their runtime cost; restore them before relying on CI as foreign-runtime execution evidence. The `action` branch does not create a GitHub Release.
 
 Monitor the run through the GitHub UI or `gh`:
 

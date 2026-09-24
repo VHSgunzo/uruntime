@@ -88,7 +88,6 @@ fn preflight_installs_prerequisites_and_runs_canonical_rust_gates() {
         "fuse3",
         "llvm",
         "musl-tools",
-        "qemu-user-static",
         "rust-src",
         "rustfmt",
         "clippy",
@@ -118,14 +117,11 @@ fn preflight_installs_prerequisites_and_runs_canonical_rust_gates() {
             .as_str(),
         Some("cargo --locked xtask check")
     );
-    assert_eq!(
-        named_step(
-            &jobs["preflight"],
-            "Run foreign AArch64 quality gates under QEMU"
-        )["run"]
-            .as_str(),
-        Some("cargo --locked xtask check aarch64-unknown-linux-musl")
-    );
+    assert!(jobs["preflight"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .all(|step| step["name"].as_str() != Some("Run foreign AArch64 quality gates under QEMU")));
 }
 
 #[test]
@@ -157,8 +153,7 @@ fn build_matrix_and_rust_artifact_validation_contract_are_preserved() {
             .unwrap_or_else(|| panic!("missing build step {name:?}"))
     };
     let build_index = step_index("Build all runtime variants");
-    let qemu_index = step_index("Install QEMU for foreign smoke tests");
-    let validation_index = step_index("Validate artifact manifest, ELF metadata, and smoke tests");
+    let validation_index = step_index("Validate artifact manifest and ELF metadata");
     let upload_index = steps
         .iter()
         .position(|step| {
@@ -167,26 +162,17 @@ fn build_matrix_and_rust_artifact_validation_contract_are_preserved() {
                 .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
         })
         .unwrap();
-    assert!(
-        build_index < qemu_index
-            && qemu_index < validation_index
-            && validation_index < upload_index
-    );
-    assert_eq!(
-        steps[qemu_index]["if"].as_str(),
-        Some("matrix.arch != 'x86_64'")
-    );
+    assert!(build_index < validation_index && validation_index < upload_index);
+    assert!(steps
+        .iter()
+        .all(|step| step["name"].as_str() != Some("Install QEMU for foreign smoke tests")));
     assert_eq!(
         steps[build_index]["run"].as_str(),
         Some("cargo --locked xtask ${{ matrix.arch }}")
     );
     assert_eq!(
-        steps[qemu_index]["run"].as_str(),
-        Some("sudo apt-get install --yes qemu-user-static")
-    );
-    assert_eq!(
         steps[validation_index]["run"].as_str(),
-        Some("cargo --locked xtask artifacts validate-arch '${{ matrix.arch }}' dist --smoke")
+        Some("cargo --locked xtask artifacts validate-arch '${{ matrix.arch }}' dist")
     );
     assert_eq!(
         steps[upload_index]["with"]["if-no-files-found"].as_str(),

@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-24
+
+This patch release hardens startup and reusable-mount behavior in minimal Linux roots, compatibility environments, and older-kernel procfs layouts without weakening normal Linux namespace authentication.
+
+### Changed
+
+- Reusable current-namespace FUSE mounts may be accepted without a PID record only for automatic hash-derived targets with implicit identity mapping when `/proc/self/ns/{user,mnt}` identities are unavailable, as on Linuxulator, some older kernels, or partial procfs implementations. Normal Linux systems with namespace identities continue to require the strict trusted-record path.
+- Process-capable procfs detection now requires `/proc/self/stat` to be a readable, nonempty regular file. Namespace-identity availability is probed separately instead of being inferred from process-stat access.
+- Current-namespace mounts that cannot publish verifiable namespace identities no longer create a PID record. A `.pid.lock` sidecar is opened only when a PID-record candidate actually exists.
+- Stable zero-length lock inodes remain adjacent to reusable targets after cleanup so concurrent launches cannot split across different lock identities. Systems without OFD locks continue to use the separate `.lease` and `.lease.lock` files of the conservative `flock` backend.
+- Foreign QEMU execution gates are temporarily disabled in CI because of their runtime cost. All six architectures are still built, and every artifact still receives manifest and ELF metadata validation; the native full quality and lifecycle gate remains enabled.
+
+### Fixed
+
+- Preserved an explicitly configured AppImage or RunImage target directory across the internal no-FUSE re-execution used for extraction fallback. The target variable is still removed before launching the application payload.
+- Avoided calling `create_dir_all` for an existing target-lock parent. This fixes lifetime-lease startup in restricted roots where an existing writable `/tmp` can be used but attempting to recreate or modify the parent is denied.
+- Allowed missing target-lock parents to be created when necessary while rejecting an existing non-directory parent with a precise error.
+- Kept file descriptors `0`, `1`, and `2` occupied when detaching the cleanup supervisor without `/dev/null`. A low-numbered fallback descriptor is duplicated and dropped before `dup2`, preventing its destructor from closing a newly installed standard descriptor.
+- Prevented Linuxulator and similarly partial procfs environments from warning about an unwritable PID record or remounting an already visible automatic FUSE target on the next launch.
+- Prevented an absent PID record from leaving an unnecessary `.pid.lock` file during reuse probing.
+
+### Validation
+
+- Added regression coverage for existing and missing target-lock parents, low-numbered descriptor ownership without `/dev/null`, no-FUSE fixed-target fallback, readable procfs probing, partial-procfs direct reuse, and PID-record sidecar creation.
+- Extended the real SquashFS and DwarFS lifecycle harness to verify fixed-target extraction fallback, operation without `/dev`, and UID-map-only current-namespace mounting.
+- Verified consecutive DwarFS AppImage launches and reusable-mount reuse on Gentoo under FreeBSD 14.1 Linuxulator.
+
 ## [0.8.0] - 2026-09-24
 
 This is a major runtime-safety and compatibility update. It changes how uruntime retains its executable and image, authenticates reusable mounts, enters namespaces, operates without procfs, and cleans up failed or expired mounts.
@@ -114,5 +141,6 @@ This is a major runtime-safety and compatibility update. It changes how uruntime
 - Generated SquashFS and DwarFS fixtures exclusively with the project-pinned embedded helpers and verified byte-for-byte reproducibility and real bounded application launches.
 - Validated all nine x86_64 and all nine AArch64 release variants, including QEMU execution for AArch64 artifacts.
 
-[Unreleased]: https://github.com/VHSgunzo/uruntime/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/VHSgunzo/uruntime/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/VHSgunzo/uruntime/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/VHSgunzo/uruntime/compare/v0.7.1...v0.8.0

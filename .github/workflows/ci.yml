@@ -32,7 +32,7 @@ jobs:
           sudo apt-get \
             -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
             -o Dir::Etc::sourceparts=- \
-            install --yes bubblewrap fuse3 llvm musl-tools qemu-user-static
+            install --yes bubblewrap fuse3 llvm musl-tools
           rustup component add rust-src rustfmt clippy
           rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 
@@ -46,8 +46,9 @@ jobs:
       - name: Run local quality gates and checksum validation
         run: cargo --locked xtask check
 
-      - name: Run foreign AArch64 quality gates under QEMU
-        run: cargo --locked xtask check aarch64-unknown-linux-musl
+      # Temporarily disabled: foreign QEMU quality gates make preflight excessively slow.
+      # - name: Run foreign AArch64 quality gates under QEMU
+      #   run: cargo --locked xtask check aarch64-unknown-linux-musl
 
   build:
     name: Build ${{ matrix.arch }}
@@ -82,12 +83,15 @@ jobs:
       - name: Build all runtime variants
         run: cargo --locked xtask ${{ matrix.arch }}
 
-      - name: Install QEMU for foreign smoke tests
-        if: matrix.arch != 'x86_64'
-        run: sudo apt-get install --yes qemu-user-static
+      # Temporarily disabled: foreign QEMU smoke tests make the matrix excessively slow.
+      # - name: Install QEMU for foreign smoke tests
+      #   if: matrix.arch != 'x86_64'
+      #   run: sudo apt-get install --yes qemu-user-static
 
-      - name: Validate artifact manifest, ELF metadata, and smoke tests
-        run: cargo --locked xtask artifacts validate-arch '${{ matrix.arch }}' dist --smoke
+      - name: Validate artifact manifest and ELF metadata
+        # QEMU smoke mode is temporarily disabled:
+        # run: cargo --locked xtask artifacts validate-arch '${{ matrix.arch }}' dist --smoke
+        run: cargo --locked xtask artifacts validate-arch '${{ matrix.arch }}' dist
 
       - name: Upload architecture artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

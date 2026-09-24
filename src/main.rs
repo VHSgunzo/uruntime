@@ -983,7 +983,7 @@ fn try_unshare(
 ) -> TryUnshareResult {
     let target_uid = requested_mapping.uid;
     let target_gid = requested_mapping.gid;
-    let procfs_available = Path::new("/proc/self/uid_map").exists();
+    let procfs_available = process_procfs_available_at(Path::new("/proc"));
 
     match plan_unshare(
         uid,
@@ -1547,11 +1547,11 @@ enum ExistingTargetAction {
     Reject,
 }
 
-fn proc_free_direct_reuse_allowed(
+fn visible_direct_reuse_allowed(
     persistent_reuse: bool,
     automatic_target: bool,
     explicit_mapping: bool,
-    procfs_available: bool,
+    namespace_identity_available: bool,
     unshare_record_present: bool,
     direct_record_present: bool,
     mounted: bool,
@@ -1559,7 +1559,7 @@ fn proc_free_direct_reuse_allowed(
     persistent_reuse
         && automatic_target
         && !explicit_mapping
-        && !procfs_available
+        && !namespace_identity_available
         && !unshare_record_present
         && !direct_record_present
         && mounted
@@ -1581,12 +1581,12 @@ fn proc_free_private_mount_requires_random_target(
 fn should_write_mount_pid_record(
     persistent_reuse: bool,
     namespace_kind: Option<NamespaceKind>,
-    procfs_available: bool,
+    namespace_identity_available: bool,
     automatic_target: bool,
     explicit_mapping: bool,
 ) -> bool {
     persistent_reuse
-        && !(!procfs_available
+        && !(!namespace_identity_available
             && namespace_kind == Some(NamespaceKind::Current)
             && automatic_target
             && !explicit_mapping)
@@ -1597,8 +1597,11 @@ fn should_validate_direct_reuse_record(
     explicit_mapping: bool,
     unshare_reuse_rejected: bool,
     mounted: bool,
+    direct_record_present: bool,
 ) -> bool {
-    !unshare_reuse_rejected && (persistent_reuse || (explicit_mapping && mounted))
+    direct_record_present
+        && !unshare_reuse_rejected
+        && (persistent_reuse || (explicit_mapping && mounted))
 }
 
 fn unshare_reuse_was_rejected(
@@ -1939,16 +1942,62 @@ enum OfdLockResult {
     Unsupported,
 }
 
-fn target_lock_path(target: &Path) -> PathBuf {
-    let mut path = target.as_os_str().to_os_string();
-    path.push(".lock");
+fn append_target_sidecar(target: &Path, suffix: &str) -> PathBuf {
+    let normalized: PathBuf = target.components().collect();
+    let mut path = normalized.as_os_str().to_os_string();
+    path.push(suffix);
     PathBuf::from(path)
 }
 
+fn target_lock_path(target: &Path) -> PathBuf {
+    append_target_sidecar(target, ".lock")
+}
+
 fn target_lease_path(target: &Path) -> PathBuf {
-    let mut path = target.as_os_str().to_os_string();
-    path.push(".lease");
-    PathBuf::from(path)
+    append_target_sidecar(target, ".lease")
+}
+
+fn prepare_target_lock_parent_with<F>(target: &Path, create_parent: F) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    let lock_path = target_lock_path(target);
+    let parent = lock_path
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match fs::metadata(parent) {
+        Ok(metadata) if metadata.is_dir() => return Ok(()),
+        Ok(_) => {
+            return Err(Error::new(
+                std::io::ErrorKind::NotADirectory,
+                format!("target lock parent {} is not a directory", parent.display()),
+            ));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(Error::new(
+                err.kind(),
+                format!(
+                    "failed to inspect target lock parent {}: {err}",
+                    parent.display()
+                ),
+            ));
+        }
+    }
+    create_parent(parent).map_err(|err| {
+        Error::new(
+            err.kind(),
+            format!(
+                "failed to create missing target lock parent {}: {err}",
+                parent.display()
+            ),
+        )
+    })
+}
+
+fn prepare_target_lock_parent(target: &Path) -> Result<()> {
+    prepare_target_lock_parent_with(target, |parent| create_dir_all(parent))
 }
 
 fn private_owner_file_identity(
@@ -2631,7 +2680,7 @@ fn check_fuse(
     if access("/dev/fuse", AccessFlags::R_OK | AccessFlags::W_OK).is_err() {
         return false;
     }
-    let procfs_available = Path::new("/proc/self/uid_map").is_file();
+    let procfs_available = process_procfs_available_at(Path::new("/proc"));
     let in_user_and_mount_namespace = procfs_available && is_in_user_and_mount_namespace();
     let has_cap_sys_admin = has_effective_capability(CAP_SYS_ADMIN);
     let existing_unshare_succeeded = state
@@ -3186,12 +3235,28 @@ fn find_suid_exe(name: &str) -> Option<PathBuf> {
     None
 }
 
-fn process_procfs_available_at(proc_root: &Path) -> bool {
-    proc_root.join("self/stat").is_file()
+fn process_procfs_available_with<F>(proc_root: &Path, probe: F) -> bool
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    let stat = proc_root.join("self/stat");
+    stat.is_file() && probe(&stat).is_ok()
 }
 
-fn cleanup_observation_complete(procfs_available: bool, child_subreaper_enabled: bool) -> bool {
-    procfs_available || child_subreaper_enabled
+fn process_procfs_available_at(proc_root: &Path) -> bool {
+    process_procfs_available_with(proc_root, |stat| {
+        let mut file = File::open(stat)?;
+        let mut byte = [0_u8; 1];
+        file.read_exact(&mut byte)
+    })
+}
+
+fn cleanup_observation_complete(_procfs_available: bool, child_subreaper_enabled: bool) -> bool {
+    child_subreaper_enabled
+}
+
+fn reusable_mount_expiry_available(procfs_available: bool, cap_sys_admin: bool) -> bool {
+    !procfs_available || cap_sys_admin
 }
 
 fn application_supervisor_required(is_extract_run: bool) -> bool {
@@ -3670,17 +3735,64 @@ fn wait_mount(pid: Pid, path: &PathBuf, timeout: Duration) -> bool {
     true
 }
 
-fn detach_supervisor_stdio() -> Result<()> {
-    let null = fs::OpenOptions::new()
+fn open_supervisor_stdio_sink(null_path: &Path, target: &Path) -> Result<File> {
+    match fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open("/dev/null")?;
+        .open(null_path)
+    {
+        Ok(file) => return Ok(file),
+        Err(err) if err.kind() == NotFound => {}
+        Err(err) => return Err(err),
+    }
+
+    for attempt in 0_u32..32 {
+        let suffix = format!(".stdio.{}.{attempt}", unsafe { libc::getpid() });
+        let path = append_target_sidecar(target, &suffix);
+        match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+        {
+            Ok(file) => {
+                remove_file(&path)?;
+                return Ok(file);
+            }
+            Err(err) if err.kind() == AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(Error::new(
+        AlreadyExists,
+        "failed to allocate an anonymous supervisor stdio sink",
+    ))
+}
+
+fn detach_supervisor_stdio_with(null_path: &Path, target: &Path) -> Result<()> {
+    let sink = open_supervisor_stdio_sink(null_path, target)?;
+    let sink = if sink.as_raw_fd() <= libc::STDERR_FILENO {
+        let duplicated = unsafe { libc::fcntl(sink.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        if duplicated == -1 {
+            return Err(Error::last_os_error());
+        }
+        drop(sink);
+        unsafe { File::from_raw_fd(duplicated) }
+    } else {
+        sink
+    };
     for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-        if unsafe { libc::dup2(null.as_raw_fd(), target) } == -1 {
+        if unsafe { libc::dup2(sink.as_raw_fd(), target) } == -1 {
             return Err(Error::last_os_error());
         }
     }
     Ok(())
+}
+
+fn detach_supervisor_stdio(target: &Path) -> Result<()> {
+    detach_supervisor_stdio_with(Path::new("/dev/null"), target)
 }
 
 fn try_setsid() {
@@ -4662,6 +4774,9 @@ fn main() {
     }
 
     let procfs_available = process_procfs_available_at(Path::new("/proc"));
+    let namespace_identity_available = NamespaceFiles::open("self")
+        .and_then(|files| files.identities())
+        .is_ok();
     let direct_mount_available = can_mount_directly(
         uid,
         false,
@@ -4733,7 +4848,7 @@ fn main() {
         }
     } else {
         env::remove_var(format!("{ENV_NAME}_TARGET_DIR"));
-        let tmp_dir = PathBuf::from(target_dir);
+        let tmp_dir = PathBuf::from(&target_dir);
         (tmp_dir.clone(), vec![tmp_dir])
     };
     drop(runtime);
@@ -4746,7 +4861,9 @@ fn main() {
     let persistent_reuse = is_remp_mount && !is_extract_run;
     let lifetime_lease_enabled = is_extract_run || persistent_reuse;
     let (mut target_coordinator, mut lifetime_lease) = if lifetime_lease_enabled {
-        match acquire_target_usage_lease(&tmp_dir) {
+        match prepare_target_lock_parent(&tmp_dir)
+            .and_then(|()| acquire_target_usage_lease(&tmp_dir))
+        {
             Ok((coordinator, lease)) => (Some(coordinator), Some(lease)),
             Err(err) => {
                 eprintln!(
@@ -4837,13 +4954,13 @@ fn main() {
     let mut direct_reuse_record = None;
     if !is_unshare_remp {
         let mounted_in_current_namespace = is_mounted(&tmp_dir).unwrap_or(false);
-        let direct_record_present =
-            !procfs_available && path_entry_present(&tmp_dir.with_extension("pid"));
+        let direct_record_present = path_entry_present(&tmp_dir.with_extension("pid"));
         if should_validate_direct_reuse_record(
             persistent_reuse,
             explicit_mapping,
             unshare_reuse_rejected,
             mounted_in_current_namespace,
+            direct_record_present,
         ) && direct_reuse_record.is_none()
         {
             direct_reuse_record = read_validated_mount_pid_file(
@@ -4854,11 +4971,11 @@ fn main() {
                 lifetime_lease.as_ref(),
             );
         }
-        let proc_free_direct_reuse = proc_free_direct_reuse_allowed(
+        let visible_direct_reuse = visible_direct_reuse_allowed(
             persistent_reuse,
             target_dir_is_empty,
             explicit_mapping,
-            procfs_available,
+            namespace_identity_available,
             unshare_record_present,
             direct_record_present,
             mounted_in_current_namespace,
@@ -4879,7 +4996,7 @@ fn main() {
             unshare_reuse_rejected,
             mounted_in_current_namespace,
             target_nonempty,
-            direct_reuse_record.is_some() || proc_free_direct_reuse,
+            direct_reuse_record.is_some() || visible_direct_reuse,
         );
         if existing_target_action == ExistingTargetAction::Reject {
             eprintln!(
@@ -4901,7 +5018,7 @@ fn main() {
             }
         }
         if mounted_in_current_namespace
-            && !Path::new("/proc/self/uid_map").is_file()
+            && !procfs_available
             && has_effective_capability(CAP_SYS_ADMIN)
             && !is_unshare
         {
@@ -4967,7 +5084,24 @@ fn main() {
                     uruntime_extract,
                     self_exe,
                     executable_size,
-                    { is_extract_run = true }
+                    {
+                        eprintln!("Trying to extract and run...");
+                        env::set_var(format!("{ENV_NAME}_EXTRACT_AND_RUN"), "1");
+                        if !target_dir_is_empty {
+                            env::set_var(format!("{ENV_NAME}_TARGET_DIR"), &target_dir);
+                        }
+                        let err = match exec_self_fd(executable, &exec_args) {
+                            Err(err) => err,
+                            Ok(()) => Error::other(
+                                "exec unexpectedly returned success without replacing the process",
+                            ),
+                        };
+                        eprintln!(
+                            "Failed to execute {:?} through its open fd: {err}",
+                            self_exe
+                        );
+                        exit(1)
+                    }
                 );
             }
         }
@@ -5042,6 +5176,9 @@ fn main() {
                     }
                 );
             }
+            if !target_dir_is_empty {
+                env::set_var(format!("{ENV_NAME}_TARGET_DIR"), &target_dir);
+            }
             let err = match exec_self_fd(executable, &exec_args) {
                 Err(err) => err,
                 Ok(()) => {
@@ -5057,7 +5194,7 @@ fn main() {
         if should_write_mount_pid_record(
             persistent_reuse,
             namespace_outcome.map(|outcome| outcome.kind),
-            procfs_available,
+            namespace_identity_available,
             target_dir_is_empty,
             explicit_mapping,
         ) {
@@ -5202,23 +5339,23 @@ fn main() {
                         );
                         if !application_tree_observable {
                             eprintln!(
-                                "Warning: child-subreaper supervision is unavailable; extracted-target cleanup will fail safe if descendant lifetime cannot be proven"
+                                "Warning: child-subreaper supervision is unavailable; extracted-target cleanup will retain the target after a successful launch because procfs cannot prove the lifetime of descendants that close inherited descriptors and exec external programs"
                             );
                         }
                     }
                     Err(err) => {
                         drop(status_reader);
                         drop(status_writer);
-                        application_tree_observable = process_procfs_available;
+                        application_tree_observable = false;
                         eprintln!(
-                            "Warning: failed to create application supervisor: {err}; extracted-target cleanup will fail safe without procfs"
+                            "Warning: failed to create application supervisor: {err}; extracted-target cleanup will retain the target after a successful launch"
                         );
                     }
                 },
                 Err(err) => {
-                    application_tree_observable = process_procfs_available;
+                    application_tree_observable = false;
                     eprintln!(
-                    "Warning: failed to create application supervisor channel: {err}; extracted-target cleanup will fail safe without procfs"
+                    "Warning: failed to create application supervisor channel: {err}; extracted-target cleanup will retain the target after a successful launch"
                 );
                 }
             }
@@ -5292,14 +5429,14 @@ fn main() {
         }
         if application_supervisor {
             try_setsid();
-            if let Err(err) = detach_supervisor_stdio() {
+            if let Err(err) = detach_supervisor_stdio(&tmp_dir) {
                 eprintln!("Warning: failed to detach application supervisor streams: {err}");
             }
         }
         if application_supervisor && child_subreaper_enabled {
             if let Err(err) = wait_for_all_children() {
                 eprintln!("Warning: failed while supervising application descendants: {err}");
-                application_tree_observable = process_procfs_available;
+                application_tree_observable = false;
             }
         }
         lifetime_read_fd = lifetime_reader;
@@ -5381,10 +5518,13 @@ fn main() {
                 );
                 if ready {
                     let _cleanup_lease = cleanup_lease_or_exit(&tmp_dir, lifetime_lease_enabled);
-                    let expire_outcome = if has_procfs {
-                        ExpireMountOutcome::FallbackUnmount
-                    } else {
+                    let expire_outcome = if reusable_mount_expiry_available(
+                        has_procfs,
+                        has_effective_capability(CAP_SYS_ADMIN),
+                    ) {
                         try_expire_mount(&tmp_dir, reuse_delay)
+                    } else {
+                        ExpireMountOutcome::FallbackUnmount
                     };
                     if expire_outcome == ExpireMountOutcome::FallbackUnmount {
                         try_unmount(Some(child_pid), &tmp_dir);

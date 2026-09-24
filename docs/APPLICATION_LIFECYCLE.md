@@ -277,7 +277,7 @@ RunImage names are under `TMPDIR/.r<uid>/mnt`:
 
 `APPIMAGE_TARGET_DIR` or `RUNIMAGE_TARGET_DIR` selects an exact path. The variable is removed before launching the application so it does not recursively affect child execution.
 
-A fixed target cannot be replaced by an automatic fresh path. Unsafe or unverifiable existing state therefore causes a fail-closed exit.
+A fixed target cannot be replaced by an automatic fresh path. Unsafe or unverifiable existing state therefore causes a fail-closed exit. Trailing directory separators do not alter target identity: adjacent sidecars are derived from the normalized target, so `/cache/app` and `/cache/app/` both use `/cache/app.lock` rather than placing `.lock` inside the target.
 
 ### 6.3 Records and lock inode
 
@@ -289,7 +289,7 @@ Depending on mode, uruntime uses these adjacent files:
 
 `Path::with_extension` replaces a target's final extension; `.lock` is instead appended to the complete target name. Automatic and fresh target names are selected so PID-record derivation cannot alias another target's records.
 
-The lock inode is opened once on the normal preparation path with `O_NOFOLLOW | O_CLOEXEC`, created as mode `0600`, and accepted only when it is a regular file owned by the current UID with no group/other permission bits. Its `dev` and `ino` identity is captured from the opened descriptor. After every potentially blocking final range acquisition, uruntime revalidates the opened descriptor and pathname for regular-file type, owner, private mode, and unchanged `dev`/`ino`, rejecting replacement or permission changes that occur while waiting.
+Before opening the lock inode, uruntime inspects its parent. An existing directory is reused without calling `create_dir_all`, changing permissions, or otherwise touching it; recursive creation occurs only after an actual `NotFound`. This preparation occurs at the target-selection call site rather than inside the lease primitive, so an empty minimal root can create `/tmp` while cleanup and validation code cannot silently recreate removed target trees. The lock inode is then opened once on the normal preparation path with `O_NOFOLLOW | O_CLOEXEC`, created as mode `0600`, and accepted only when it is a regular file owned by the current UID with no group/other permission bits. Its `dev` and `ino` identity is captured from the opened descriptor. After every potentially blocking final range acquisition, uruntime revalidates the opened descriptor and pathname for regular-file type, owner, private mode, and unchanged `dev`/`ino`, rejecting replacement or permission changes that occur while waiting.
 
 Linux open-file-description locks divide that inode into independent one-byte ranges:
 
@@ -303,7 +303,7 @@ Cloned descriptors share one open-file description. Preparation, record-publicat
 
 The lock inode intentionally remains after target removal. Removing its pathname while another process still holds or opens it could split coordination across two inodes. It follows the containing temporary directory's lifecycle.
 
-Kernels before Linux 3.15 and filesystems without OFD-lock support use the conservative `flock` backend. That compatibility path keeps the former separate `<target>.lease`, `<target>.lease.lock`, and `<record>.lock` files because `flock` cannot express independent byte ranges. Permission failures such as `EPERM` or `EACCES` fail closed instead of selecting another backend: otherwise differently sandboxed peers could split coordination between independent OFD and `flock` lock domains. This fallback preserves lifecycle semantics; it is not a migration protocol for concurrently running pre-release runtime revisions.
+Kernels before Linux 3.15, filesystems without OFD-lock support, and compatibility layers that do not implement OFD locks use the conservative `flock` backend. That path creates separate `<target>.lease` and `<target>.lease.lock` files because `flock` cannot express independent byte ranges. A `<record>.lock` sidecar is created only when a corresponding PID-record candidate actually exists or a record is being published; a recordless current-namespace reuse check does not create a stray `.pid.lock`. Permission failures such as `EPERM` or `EACCES` fail closed instead of selecting another backend: otherwise differently sandboxed peers could split coordination between independent OFD and `flock` lock domains. This fallback preserves lifecycle semantics; it is not a migration protocol for concurrently running pre-release runtime revisions.
 
 ### 6.4 Lifetime lease coverage
 
@@ -347,7 +347,7 @@ flowchart TD
     D -- no --> P{Mount visible in current namespace?}
     P -- yes --> Q{Trusted .pid record validates?}
     Q -- yes --> R[Reuse current-namespace mount]
-    Q -- no --> S{Procfs-free direct reuse allowed?}
+    Q -- no --> S{Automatic implicit target<br/>without PID records?}
     S -- yes --> R
     S -- no --> X
     P -- no --> T{Persistent target nonempty?}
@@ -381,7 +381,7 @@ Records are published atomically:
 
 A failed publication removes its temporary file. Orphan temporary entries left by a process crash are scavenged only while a record is being published. The hot record-validation/reuse path neither scans nor mutates the parent directory; temporary publication files do not participate in record parsing or trust decisions.
 
-A record-write failure warns and affects future reuse, but does not retroactively invalidate a mount that is already running. On the intentional procfs-free current-namespace reuse path, no unverifiable PID record is written.
+A record-write failure warns and affects future reuse, but does not retroactively invalidate a mount that is already running. An automatic implicit current-namespace mount does not need a PID record: the live mount is directly observable without entering another namespace. This also avoids a race with FUSE launchers that exit or daemonize immediately after the mount becomes ready.
 
 ### 7.2 Private namespace reuse
 
@@ -402,32 +402,31 @@ Results are handled as follows:
 
 Fresh names append `fresh<random>` to the complete filename rather than creating another extension, keeping `.pid` and `.un.pid` sidecars distinct from the original target.
 
-### 7.3 Current-namespace reuse with procfs
+### 7.3 Current-namespace reuse
 
-A reusable mount visible in the current namespace normally requires a validated `.pid` record. The record must identify `NamespaceKind::Current`, match the requested mapping and process generation, and match the opened namespace identities.
-
-An unmounted but nonempty persistent target is rejected. Contents alone do not prove that the expected FUSE mount exists.
-
-### 7.4 Procfs-free direct FUSE reuse
-
-A FUSE mount already visible in the current namespace may be reused without procfs only when all of these conditions hold:
+A reusable mount visible in the current namespace may be reused without a PID record only when all of these conditions hold:
 
 - persistent reuse was selected;
 - the target is the automatic hash-derived target, not a fixed path;
 - no explicit UID/GID mapping was requested;
-- procfs is unavailable;
 - neither `.pid` nor `.un.pid` exists;
 - the target is confirmed to be a live, readable mount.
 
-This path does not call `setns` and does not write a PID record.
+This proof is independent of whether procfs is complete, partial, or absent. It does not call `setns`. It covers older kernels and compatibility environments such as Linuxulator where `/proc/self/stat` may be readable while one or both of `/proc/self/ns/{user,mnt}` are unavailable.
 
-### 7.5 Extraction reuse
+If a PID record exists, it must validate normally; the direct visible-mount path never bypasses a malformed or stale record. Fixed targets, explicit mappings, and private namespace mounts also retain strict record requirements.
+
+An unmounted but nonempty persistent target is rejected. Contents alone do not prove that the expected FUSE mount exists.
+
+### 7.4 Extraction reuse
 
 Extracted contents do not require a live helper or namespace transition, so their cache identity is hash-based. Nonempty matching targets can be reused. The shared lease prevents an earlier launch from deleting the directory while another launch still uses it.
 
 A launch classified as `Reuse` does not start another cleanup actor. A launch classified as `Create` owns cleanup even when the extraction helper discovers that another process populated the hash target first and therefore performs no extraction. The exclusive lease still serializes those cleanup actors, so one cannot delete data while another shared user remains.
 
 ## 8. Namespace creation and FUSE availability
+
+All namespace and FUSE branches use the same functional procfs probe: `/proc/self/stat` must be a readable regular file. A partial or synthetic tree containing only `/proc/self/uid_map` is treated as no procfs; it must not select mapping-based user-namespace setup that cannot inspect process identity consistently.
 
 ```mermaid
 flowchart TD
@@ -494,13 +493,13 @@ Extraction remains hash-reusable because it does not require namespace-owner aut
 
 There are two distinct failure stages:
 
-1. **FUSE is unavailable before helper startup**: apply `URUNTIME_EXTRACT` immediately. Mount-only never extracts.
+1. **FUSE is unavailable before helper startup**: apply `URUNTIME_EXTRACT` by setting the extract-and-run request and reexecuting the retained runtime. Reexecution recomputes target type and reuse policy instead of carrying stale persistent-mount state into extraction. Mount-only never extracts.
 2. **The helper was started but no mount appeared within one second**:
    - if this was the first ordinary attempt, set the format's `*_UNSHARE` request and reexec the retained runtime;
    - if isolation was already requested/attempted, and extraction policy allows it, remove stale isolation mapping variables as appropriate, set `*_EXTRACT_AND_RUN=1`, and reexec the retained runtime;
    - otherwise exit with the FUSE diagnostic.
 
-Reexecution preserves the original argument list and uses the retained executable inode.
+Reexecution preserves the original argument list and uses the retained executable inode. An explicit `*_TARGET_DIR` is restored only for the internal reexecution so the replacement runtime keeps the caller's exact target; the replacement removes it again before launching the payload.
 
 ## 9. Creating the filesystem view
 
@@ -595,9 +594,7 @@ sequenceDiagram
         alt subreaper enabled
             D-->>S: descendants are adopted and reaped
             S->>S: waitpid until ECHILD
-        else procfs available
-            S->>S: cleanup later scans /proc PID exe links
-        else neither mechanism proves completeness
+        else subreaper unavailable
             S->>K: retain extracted target
         end
         S->>L: release this launch's shared lease
@@ -613,7 +610,7 @@ sequenceDiagram
         A-->>C: exit
         C->>C: fork detached cleanup when safe
         C->>L: release shared lease in cleanup actor
-        C->>K: require procfs only for extracted-target removal
+        C->>K: retain a successfully launched extracted target
     end
 ```
 
@@ -626,12 +623,12 @@ These mechanisms solve different problems:
 - the **shared lease** coordinates overlapping uruntime launches using the same target;
 - an inherited lease FD follows ordinary fork/exec descendants unless they close it;
 - the **no-proc lifetime pipe** detects closure of inherited writers but has the same deliberate-close limitation;
-- **procfs scanning** globally finds processes whose executable path is inside the target, independent of parentage;
+- **procfs scanning** finds processes whose current executable path is inside the target, independent of parentage, but cannot prove the future use of the target by a daemon that closes inherited descriptors and execs an external program;
 - the **child subreaper** covers double-fork daemons that close inherited descriptors by adopting and waiting for them before an extracted directory can be removed.
 
-Deleting an extracted directory without procfs is considered safe only when child-subreaper supervision succeeded. If procfs is available, procfs remains the compatibility fallback when subreaper setup is unavailable. This descendant-visibility requirement does not block FUSE cleanup: the kernel rejects an ordinary unmount with `EBUSY` while the mount has active references, and reusable mounts additionally use `MNT_EXPIRE` to detect renewed access and retain busy or failed mounts.
+Deleting an extracted directory after a successful application launch is considered safe only when child-subreaper supervision succeeded. Procfs is useful for ordinary executable-path observation but is not complete descendant-lifetime proof: a double-fork daemon can close inherited descriptors, exec outside the target, and access target data later. If subreaper setup is unavailable, uruntime warns and retains the extracted target. This requirement does not block FUSE cleanup: the kernel rejects an ordinary unmount with `EBUSY` while the mount has active references. Reusable mounts additionally use `MNT_EXPIRE` when uruntime has `CAP_SYS_ADMIN`; an ordinary unprivileged FUSE mount cannot call `umount2(MNT_EXPIRE)` directly and instead uses the fusermount-based ordinary-unmount chain after procfs observation.
 
-`PR_SET_CHILD_SUBREAPER` errors `EINVAL`, `ENOSYS`, and `EPERM` are treated as an unavailable compatibility feature rather than an application-launch failure. Other errors are reported, but application launch still proceeds with procfs as the fallback when procfs works.
+`PR_SET_CHILD_SUBREAPER` errors `EINVAL`, `ENOSYS`, and `EPERM` are treated as an unavailable compatibility feature rather than an application-launch failure. Other errors are also reported. Application launch still proceeds, but successful extracted-target cleanup fails safe by retaining the target.
 
 ### 12.2 Status propagation
 
@@ -640,7 +637,7 @@ For extract-and-run, the original caller reads two fixed-size values from the su
 1. application PID, used for signal forwarding;
 2. main application exit code.
 
-The extraction supervisor reports the main application's status before waiting for adopted background descendants and before delayed cleanup. It then detaches its standard streams so shell pipelines and output-capture APIs are not held open by lifecycle work. A FUSE-backed launch has no application supervisor: the original runtime waits for the main application directly and then hands cleanup to the normal detached cleanup actor.
+The extraction supervisor reports the main application's status before waiting for adopted background descendants and before delayed cleanup. It then detaches its standard streams so shell pipelines and output-capture APIs are not held open by lifecycle work. Normally each stream is redirected to `/dev/null`; in a minimal root without that device, the supervisor creates a private temporary sink next to the target, unlinks it immediately, and redirects descriptors `0`, `1`, and `2` to the still-open anonymous inode. This keeps the standard descriptor numbers occupied without leaving a pathname or allowing later lock/control files to reuse them. A FUSE-backed launch has no application supervisor: the original runtime waits for the main application directly and then hands cleanup to the normal detached cleanup actor.
 
 If the main child exits due to a signal and no numeric exit code is available, the current implementation retains the initialized exit code (`0`). A spawn failure reports PID `0`, prints the execution error, uses exit code `1`, and enters immediate inline cleanup.
 
@@ -652,7 +649,7 @@ The runtime handles `SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGTERM`, `SIGUSR1`, and `SI
 - A mount-only owner or cleanup actor can use the signal path to attempt unmounting the FUSE target.
 - Cleanup signal handling resets those signals to their default dispositions after the unmount attempt.
 
-Signal forwarding targets the main child. Descendant completion is handled independently through subreaper/procfs/lease observation.
+Signal forwarding targets the main child. Descendant completion is handled independently through subreaper, procfs, and lease observation; only the subreaper is accepted as complete proof for destructive extraction cleanup after a successful launch.
 
 ## 14. Cleanup ownership and execution mode
 
@@ -728,7 +725,8 @@ The cleanup actor waits for EOF on the application lifetime pipe, then sleeps fo
 
 | procfs | subreaper | Extracted target | FUSE mount |
 |---|---|---|---|
-| available | available or unavailable | cleanup may proceed; procfs is the compatibility observer | subreaper is not used; wait through procfs policy, then use the ordinary unmount chain |
+| available | available | supervisor waits for adopted descendants, then cleanup may proceed | subreaper is not used; wait through procfs policy, then use `MNT_EXPIRE` when `CAP_SYS_ADMIN` permits it, otherwise use the ordinary fusermount chain |
+| available | unavailable | warn and retain extraction; procfs cannot prove lifetime after an external exec | same kernel-guarded mount cleanup as above |
 | absent | available | extraction supervisor waits for every adopted descendant, then cleanup may proceed | subreaper is not used; wait for lifetime EOF and additionally use `MNT_EXPIRE` for reusable mounts |
 | absent | unavailable | warn and retain extraction; inherited FDs alone are not accepted as complete proof | continue to kernel-guarded expiry/unmount; retain on busy or hard failure |
 | procfs disappears before cleanup | unavailable | same fail-safe extraction retention | same kernel-guarded mount cleanup; no supervisor dependency |
@@ -766,7 +764,9 @@ flowchart TD
     L -- yes --> M{procfs available?}
     M -- yes --> N[Wait through procfs delay and checks]
     N --> O[Acquire exclusive cleanup lease]
-    O --> K
+    O --> O1{CAP_SYS_ADMIN available?}
+    O1 -- yes --> Q
+    O1 -- no --> K
     M -- no --> P[Wait inherited lifetime EOF]
     P --> O2[Acquire exclusive cleanup lease]
     O2 --> Q[MNT_EXPIRE state machine]
@@ -863,10 +863,8 @@ For private records, a dead owner PID causes stale-record removal under the reco
 | trusted PID record cannot be published | warn and continue current mount; future reuse may be unavailable |
 | `AppRun` or RunImage `static/bash` absent | remove runtime-owned temporary state where possible and exit |
 | application spawn fails | exit `1` after immediate inline cleanup |
-| extraction supervisor channel/fork fails with procfs | launch continues; procfs cleanup fallback |
-| extraction supervisor channel/fork fails without procfs | launch continues; extracted target is retained |
-| child-subreaper unsupported with procfs | launch continues; procfs observes cleanup readiness |
-| child-subreaper unsupported without procfs | launch continues; extraction is retained, while FUSE expiry/unmount remains available |
+| extraction supervisor channel/fork fails | launch continues; a successfully launched extracted target is retained |
+| child-subreaper unsupported | launch continues; extraction is retained, while FUSE expiry/unmount remains available |
 | shared lease still held | cleanup waits and retries |
 | mount expiry busy or hard-fails | retain mount |
 | expiry unsupported | ordinary unmount fallback |
@@ -944,7 +942,7 @@ else:
 reused target -> release this launch and skip destructive cleanup
 creator with failed spawn -> immediate inline cleanup, preserve failure
 creator with normal exit -> detached/supervisor cleanup
-if extraction has a started app with neither procfs nor complete subreaper observation:
+if extraction has a started app without complete subreaper observation:
     warn and retain extracted target
 wait for process/lifetime inactivity and configured delay
 acquire coordinator range + exclusive lifetime range
@@ -1007,7 +1005,7 @@ The Rust harness in [`xtask/src/lifecycle.rs`](../xtask/src/lifecycle.rs) create
 - extract-and-run with explicit unshare enabled;
 - the FD-closing double-fork daemon;
 - live seccomp denial of `PR_SET_CHILD_SUBREAPER` through [`tests/fixtures/deny_subreaper.rs`](../tests/fixtures/deny_subreaper.rs);
-- fail-safe retention when neither procfs nor subreaper visibility exists.
+- fail-safe retention whenever complete subreaper visibility is unavailable, including when procfs exists.
 
 Every scenario has a bounded deadline. The harness requires payload access while each application tree is alive, proves that the first overlapping cleanup cannot remove the shared target, and requires eventual target removal after the final observable application tree exits. The denied-subreaper lane instead requires the retained target and warning.
 
