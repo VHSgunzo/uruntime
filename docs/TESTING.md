@@ -23,7 +23,7 @@ For the native musl target, `cargo xtask check` runs:
 9. checksum-manifest validation;
 10. `git diff --check`.
 
-A foreign target also runs its Rust tests under QEMU, but reports the native namespace/FUSE lifecycle harness as `NOT RUN` because QEMU user mode cannot substitute for real target-architecture namespaces and mounts.
+An explicitly requested foreign `cargo xtask check <target>` runs its Rust tests under QEMU, but reports the native namespace/FUSE lifecycle harness as `NOT RUN` because QEMU user mode cannot substitute for real target-architecture namespaces and mounts. This complete AArch64 quality gate is currently retained as a commented CI step because it is expensive.
 
 ## Rust test components
 
@@ -125,8 +125,8 @@ The full native gate requires `bwrap`. The FUSE lane additionally requires reada
 
 `.github/workflows/ci.yml` has no dependency on repository-owned Python, shell, or C files:
 
-1. **Preflight** installs Bubblewrap, FUSE, musl, LLVM, QEMU, and both required Rust targets. It runs the canonical native Rust gate and the foreign AArch64 gate under QEMU.
-2. **Build** invokes `cargo --locked xtask <architecture>` for all six architectures. `xtask/src/artifacts.rs` then validates each exact nine-file manifest and runs native or QEMU smoke tests before upload.
+1. **Preflight** installs Bubblewrap, FUSE, musl, LLVM, and both required Rust targets. It runs the canonical native Rust gate. The complete foreign AArch64 `cargo xtask check aarch64-unknown-linux-musl` gate remains commented because it runs the Rust test suites through QEMU.
+2. **Build** invokes `cargo --locked xtask <architecture>` for all six architectures. For every foreign matrix job, CI installs `qemu-user-static`; `xtask/src/artifacts.rs` validates each exact nine-file manifest and smoke-runs every finished foreign runtime through its matching QEMU runner before upload. The x86_64 job runs the same smoke checks natively.
 3. **Release** downloads the six architecture artifacts and uses only Rust `xtask artifacts` subcommands for aggregation, paginated GitHub JSON handling, asset-ID extraction, and final 54-file manifest validation.
 
 The multiline `run:` blocks that remain in the workflow are GitHub Actions command steps for package installation, GitHub API calls, and guarded publication. They do not reference a repository `scripts/` directory or reimplement the Rust validators.

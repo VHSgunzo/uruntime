@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Restored per-architecture QEMU smoke execution for all finished foreign runtime artifacts in CI. The full AArch64 Rust quality gate remains commented while its QEMU test-suite cost is investigated.
+
 ## [0.8.1] - 2026-09-24
 
 This patch release hardens startup and reusable-mount behavior in minimal Linux roots, compatibility environments, and older-kernel procfs layouts without weakening normal Linux namespace authentication.

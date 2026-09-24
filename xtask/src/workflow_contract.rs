@@ -163,16 +163,19 @@ fn build_matrix_and_rust_artifact_validation_contract_are_preserved() {
         })
         .unwrap();
     assert!(build_index < validation_index && validation_index < upload_index);
-    assert!(steps
-        .iter()
-        .all(|step| step["name"].as_str() != Some("Install QEMU for foreign smoke tests")));
+    let qemu_install = named_step(build, "Install QEMU for foreign smoke tests");
+    assert_eq!(qemu_install["if"].as_str(), Some("matrix.arch != 'x86_64'"));
+    assert_eq!(
+        qemu_install["run"].as_str(),
+        Some("sudo apt-get install --yes qemu-user-static")
+    );
     assert_eq!(
         steps[build_index]["run"].as_str(),
         Some("cargo --locked xtask ${{ matrix.arch }}")
     );
     assert_eq!(
         steps[validation_index]["run"].as_str(),
-        Some("cargo --locked xtask artifacts validate-arch '${{ matrix.arch }}' dist")
+        Some("cargo --locked xtask artifacts validate-arch '${{ matrix.arch }}' dist --smoke")
     );
     assert_eq!(
         steps[upload_index]["with"]["if-no-files-found"].as_str(),

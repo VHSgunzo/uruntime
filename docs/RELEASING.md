@@ -157,7 +157,7 @@ The workflow runs when you push to the `action` branch:
 git push origin HEAD:action
 ```
 
-This run performs preflight, builds all six architectures, and verifies nine files per architecture. Foreign QEMU quality and smoke gates are currently retained as commented workflow steps because of their runtime cost; restore them before relying on CI as foreign-runtime execution evidence. The `action` branch does not create a GitHub Release.
+This run performs preflight, builds all six architectures, verifies nine files per architecture, and smoke-runs every finished foreign runtime through its matching QEMU user-mode runner. The complete foreign AArch64 Rust quality gate remains retained as a commented workflow step because it runs the test suites under QEMU and is substantially more expensive. The `action` branch does not create a GitHub Release.
 
 Monitor the run through the GitHub UI or `gh`:
 
