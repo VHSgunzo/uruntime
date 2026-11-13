@@ -10,9 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Updated bundled DwarFS to 0.15.8 and squashfuse to 0.6.5, with refreshed source/payload checksums for all six architectures. squashfs-tools remains 4.7.5.r2.
-- Rebuilt squashfuse with libfuse 3.18.3, XZ 5.8.4, zlib 1.4 and LZ4 1.11.1; retained mimalloc 2.1.7 for compatibility.
-- Refreshed runtime and xtask Rust dependencies, including zstd 0.14.4 and sha2 0.11.1; adapted SHA-256 formatting to preserve lowercase, zero-padded output.
+- Updated bundled DwarFS to 0.15.8 and squashfuse to 0.6.5, with refreshed source/payload checksums for all six architectures.
+- Refreshed runtime and xtask Rust dependencies.
 - Restored QEMU smoke tests for every foreign release artifact. The expensive full AArch64 Rust quality gate remains disabled.
 - Updated the lifecycle diagrams and cleanup/reuse reference to match the implementation.
 
@@ -20,11 +19,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Automatic persistent mounts recover from interrupted PID-record publication by selecting a fresh target, without trusting temporary records or unmounting unverifiable state (#28). Explicit targets, mapping requirements and malformed published records retain strict validation; no configuration changes are required.
 - Pinned memfd-exec 0.2.7 to fix descriptor double-closes and aborts during helper execution without procfs or after a failed exec.
-
-### Validation
-
-- Extended the SquashFS/DwarFS lifecycle harness with recordless-mount recovery, unchanged orphan-record checks, overlapping leases and fixed-target rejection.
-- Added SHA-256 known-vector regressions.
 
 ## [0.8.1] - 2026-09-24
 
