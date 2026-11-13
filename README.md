@@ -130,6 +130,7 @@ See [Building uruntime](docs/BUILDING.md) for prerequisites, targets, toolchains
 - [Usage reference](docs/USAGE.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Application launch, lifetime, and cleanup](docs/APPLICATION_LIFECYCLE.md)
+- [Metadata SquashFS sidecar](docs/METADATA_SIDECAR.md)
 - [Building uruntime](docs/BUILDING.md)
 - [Testing uruntime](docs/TESTING.md)
 - [Release procedure](docs/RELEASING.md)
