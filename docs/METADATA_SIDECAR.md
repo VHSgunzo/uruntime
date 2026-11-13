@@ -18,6 +18,12 @@ The slot is exactly **128 KiB**. The metadata image must be a SquashFS 4.0
 filesystem whose `bytes_used` superblock field is at most 128 KiB. The bytes
 between `bytes_used` and the end of the slot must be zero.
 
+The fixed slot keeps the DwarFS payload at a stable offset. zsync compares
+fixed-size blocks; if the metadata image size changed, the payload offset would
+move and the whole payload would look different, so updates would download far
+more than necessary. Padding to a fixed size limits the changed data to the
+metadata block.
+
 The application payload is a complete DwarFS image. It is not merged with the
 metadata image, and the runtime mounts or extracts it as the real application.
 SquashFS AppImages already expose their filesystem to SquashFS tools, so they
@@ -27,7 +33,8 @@ do not need this layout.
 
 - Write the metadata SquashFS immediately after the ELF runtime.
 - Keep the metadata image small enough that `bytes_used <= 128 KiB`.
-- Zero-pad the metadata image to exactly 128 KiB.
+- Zero-pad the metadata image to exactly 128 KiB so the payload offset stays
+  stable for zsync delta updates.
 - Append a complete DwarFS application image.
 - The metadata image should carry `.DirIcon`, the desktop entry, and a stub
   `AppRun` for tools that expect a SquashFS AppImage.

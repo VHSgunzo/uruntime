@@ -441,6 +441,10 @@ fn mfd_exec(exec_name: &str, exec_bytes: &[u8], exec_args: Vec<String>) {
 /// A builder that wants SquashFS thumbnailers to see AppImage metadata writes
 /// a small SquashFS image at the ELF boundary and zero-pads it to this size.
 /// The application payload starts immediately after the slot.
+///
+/// The slot is fixed so the payload offset does not move when the metadata
+/// image changes. zsync compares fixed-size blocks; a moving payload would
+/// make almost everything look changed and force large downloads.
 const METADATA_SLOT_SIZE: u64 = 128 * 1024;
 
 /// SquashFS superblock size and the offset of its little-endian `bytes_used`
