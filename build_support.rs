@@ -14,10 +14,10 @@ use sha2::{Digest, Sha256};
 use tempfile::{Builder as TempBuilder, NamedTempFile};
 use xxhash_rust::xxh64::xxh64;
 
-pub const DWARFS_VERSION: &str = "0.15.7";
+pub const DWARFS_VERSION: &str = "0.15.8";
 
 pub const SQUASHFS_TOOLS_VERSION: &str = "4.7.5.r2";
-pub const SQUASHFUSE_VERSION: &str = "0.6.3.r2";
+pub const SQUASHFUSE_VERSION: &str = "0.6.5";
 pub const ZIG_VERSION: &str = "0.16.0";
 pub const ZIG_INDEX_URL: &str = "https://ziglang.org/download/index.json";
 pub const ZIG_DOWNLOAD_BASE: &str = "https://ziglang.org/download";
@@ -31,10 +31,10 @@ pub const ZIG_PLATFORMS: [&str; 5] = [
 ];
 pub const CHECKSUM_MANIFEST: &str = include_str!("checksums.txt");
 
-// Largest v0.15.7 wrapper: 2,965,645 bytes; largest r2 direct helper:
+// Largest v0.15.8 wrapper: 2,966,430 bytes; largest direct SquashFS helper:
 // 1,264,416 bytes. Eight MiB leaves >2.8x margin while bounding downloads/cache reads.
 pub const MAX_DOWNLOAD_SIZE: usize = 8 * 1024 * 1024;
-// Largest extracted v0.15.7 helper: 8,766,832 bytes. Sixteen MiB leaves >1.9x margin.
+// Largest extracted v0.15.8 helper: 8,767,152 bytes. Sixteen MiB leaves >1.9x margin.
 pub const MAX_HELPER_SIZE: usize = 16 * 1024 * 1024;
 const LOCK_TIMEOUT: Duration = Duration::from_secs(120);
 const LOCK_RETRY: Duration = Duration::from_millis(25);
@@ -158,9 +158,9 @@ pub enum AssetKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ElfType {
-    /// squashfs-tools-static/squashfuse-static r2 files are static PIE (ET_DYN).
+    /// Direct SquashFS helper files are static PIE (ET_DYN).
     StaticPie,
-    /// DwarFS v0.15.7 wrapper payloads are static ET_EXEC files.
+    /// DwarFS v0.15.8 wrapper payloads are static ET_EXEC files.
     StaticExec,
 }
 
@@ -656,7 +656,13 @@ fn read_bounded(path: &Path, max_size: usize) -> Result<Vec<u8>, String> {
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(data))
+    use std::fmt::Write as _;
+
+    let mut hex = String::with_capacity(64);
+    for byte in Sha256::digest(data) {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 pub fn sha256_file(path: &Path, max_size: usize) -> Result<String, String> {

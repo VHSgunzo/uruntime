@@ -2,7 +2,7 @@ cargo-features = ["panic-immediate-abort"]
 
 [package]
 name = "uruntime"
-version = "0.8.1"
+version = "0.8.2"
 license = "MIT"
 repository = "https://github.com/VHSgunzo/uruntime"
 description = "Universal RunImage and AppImage runtime with SquashFS and DwarFS supports"
@@ -31,29 +31,29 @@ appimage = []
 
 [build-dependencies]
 fs2 = "0.4.3"
-sha2 = "0.10.9"
-tempfile = "3.23.0"
-zstd = { version = "0.13.3", default-features = false }
-xxhash-rust = { version = "0.8.18", features = [ "xxh64" ] }
+sha2 = "0.11.1"
+tempfile = "3.27.0"
+zstd = { version = "0.14.4", default-features = false }
+xxhash-rust = { version = "0.8.19", features = [ "xxh64" ] }
 
 [dependencies]
-which = "8.0.5"
-cfg-if = "1.0.4"
+which = "8.0.6"
+cfg-if = "1.0.5"
 goblin = "0.10.7"
 procfs = { version = "0.18.0", optional = true }
 num_cpus = { version = "1.17.0", optional = true }
-signal-hook = "0.4.4"
-zstd = { version = "0.13.3", default-features = false }
-xxhash-rust = { version = "0.8.18", features = [ "xxh3" ] }
+signal-hook = "0.4.6"
+zstd = { version = "0.14.4", default-features = false }
+xxhash-rust = { version = "0.8.19", features = [ "xxh3" ] }
 nix = { version = "0.31.3", features = [ "fs", "signal", "mount" ] }
 dotenv = { git = "https://github.com/VHSgunzo/dotenv.git", rev = "367085af80a8d29d2241c85cbfc25736486230c5" }
-memfd-exec = { git = "https://github.com/VHSgunzo/memfd-exec.git", rev = "2decf7d1cec3d183e55000526abd2e5bb6df40c5" }
+memfd-exec = { git = "https://github.com/VHSgunzo/memfd-exec.git", rev = "5a94a9c44f4e8a6ea74ce60d81f9e89c5557b505" }
 
 [target.'cfg(not(target_arch = "x86_64"))'.dependencies]
-zstd = { version = "0.13.3", default-features = false, features = [ "no_asm" ] }
+zstd = { version = "0.14.4", default-features = false, features = [ "no_asm" ] }
 
 [dev-dependencies]
 fs2 = "0.4.3"
-sha2 = "0.10.9"
-tempfile = "3.23.0"
-xxhash-rust = { version = "0.8.18", features = [ "xxh64" ] }
+sha2 = "0.11.1"
+tempfile = "3.27.0"
+xxhash-rust = { version = "0.8.19", features = [ "xxh64" ] }

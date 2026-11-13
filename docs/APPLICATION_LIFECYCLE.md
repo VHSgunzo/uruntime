@@ -31,17 +31,19 @@ flowchart TD
     I -- yes --> I1[Extract into caller directory]
     I1 --> Z
     I -- no --> J[Resolve mode, isolation, mapping,<br/>reuse delay and target path]
-    J --> K[Open target lock inode and acquire<br/>coordinator plus shared lifetime ranges]
+    J --> K[For extraction or persistent mounts, acquire<br/>coordinator plus shared lifetime ranges]
     K --> L{Existing target?}
     L -- trusted reusable --> M[Join existing extraction or mount]
     L -- unavailable automatic target --> N[Atomically reserve fresh target and replace target lease]
     L -- unsafe or fixed target --> X[Fail closed]
     L -- absent or safely creatable --> O[Prepare namespace and FUSE access]
     N --> O
-    O --> P{FUSE usable?}
-    P -- yes --> Q[Fork helper and mount image]
-    P -- no, extraction allowed --> R[Fork helper and extract image]
-    P -- no, extraction forbidden --> X
+    O --> P{Extract-and-run selected?}
+    P -- yes --> R[Fork helper and extract image]
+    P -- no --> P1{FUSE usable?}
+    P1 -- yes --> Q[Fork helper and mount image]
+    P1 -- no, extraction allowed --> V
+    P1 -- no, extraction forbidden --> X
     Q --> S{Mount became ready?}
     S -- yes --> T[Optionally publish trusted PID record]
     S -- no, first direct attempt --> U[Re-exec retained runtime and request unshare]
@@ -53,8 +55,11 @@ flowchart TD
     W --> Y{Mount-only mode?}
     T --> Y
     M --> Y
-    Y -- yes --> Y1[Print target; wait only when this launch<br/>created the mount]
-    Y1 --> CL[Cleanup selection]
+    Y -- yes --> Y1[Print target]
+    Y1 --> Y2{Reused mount?}
+    Y2 -- yes --> Z
+    Y2 -- no --> Y3[Wait for helper or signals]
+    Y3 --> CM[Remove PID and empty runtime-owned directories]
     Y -- no --> AA[Prepare AppRun or RunImage command,<br/>portable environment and capability policy]
     AA --> AB{Extract-and-run target?}
     AB -- yes --> AB1[Create application supervisor<br/>and enable child subreaper when possible]
@@ -63,7 +68,7 @@ flowchart TD
     AC --> AD[Return main application status<br/>to original caller]
     AD --> AE{Extraction supervisor active?}
     AE -- yes --> AE1[Wait for adopted descendants<br/>when child-subreaper is available]
-    AE -- no, FUSE --> CL
+    AE -- no, FUSE --> CL[Cleanup selection]
     AE1 --> CL
     CL --> CF{Reused target?}
     CF -- yes --> Z
@@ -102,7 +107,7 @@ The runtime follows these invariants throughout startup and cleanup:
 6. A fixed target is never silently replaced with another path. Automatic targets may use a fresh sibling only while the caller is still in its original namespace.
 7. Every participating launch of a reusable extraction or persistent FUSE target holds a shared lifetime lease. Destructive cleanup requires the coordinator and an exclusive lease.
 8. If uruntime cannot prove that daemonized descendants are finished, it retains an extracted target rather than deleting it unsafely. FUSE cleanup relies on kernel unmount and expiry safeguards instead.
-9. A failed application spawn is represented separately from a normally exited application and receives immediate inline cleanup while preserving the launch failure status.
+9. A failed application spawn is represented separately from a normally exited application. A creator performs immediate inline cleanup while preserving the launch failure status; a reused-target launch still skips destructive cleanup.
 10. Busy mounts and hard expiry failures are retained. Cleanup must fail safe.
 
 ### 2.1 Internal state model
@@ -314,7 +319,7 @@ A shared lifetime lease is acquired for:
 
 It is not acquired for an ordinary random non-reusable FUSE target. The preparation coordinator range is held while existing state is inspected and while a create/reuse decision is made, then explicitly unlocked before application execution. The shared lifetime range remains held.
 
-If an automatic mount must move to a fresh sibling, the old shared lease and coordinator are released and reacquired for the new pathname.
+If an automatic mount must move to a fresh sibling, uruntime reserves the new directory and acquires its shared lease and coordinator before replacing the old target, cleanup-directory entries, and guards. Preparation failure leaves the old state unchanged and attempts to remove the fresh reservation.
 
 ## 7. Existing target and reuse decisions
 
@@ -347,8 +352,10 @@ flowchart TD
     D -- no --> P{Mount visible in current namespace?}
     P -- yes --> Q{Trusted .pid record validates?}
     Q -- yes --> R[Reuse current-namespace mount]
-    Q -- no --> S{Automatic implicit target<br/>without PID records?}
-    S -- yes --> R
+    Q -- no --> S{Persistent automatic implicit target<br/>without PID records?}
+    S -- yes --> S2{Namespace identity unavailable?}
+    S2 -- yes --> R
+    S2 -- no --> N
     S -- no --> X
     P -- no --> T{Persistent target nonempty?}
     T -- yes --> X
@@ -381,7 +388,7 @@ Records are published atomically:
 
 A failed publication removes its temporary file. Orphan temporary entries left by a process crash are scavenged only while a record is being published. The hot record-validation/reuse path neither scans nor mutates the parent directory; temporary publication files do not participate in record parsing or trust decisions.
 
-A record-write failure warns and affects future reuse, but does not retroactively invalidate a mount that is already running. An automatic implicit current-namespace mount does not need a PID record: the live mount is directly observable without entering another namespace. This also avoids a race with FUSE launchers that exit or daemonize immediately after the mount becomes ready.
+A record-write failure warns and affects future reuse, but does not retroactively invalidate a mount that is already running. Without namespace identity support, an automatic implicit current-namespace mount does not need a PID record: the live mount is directly observable without entering another namespace. With namespace identity support, a missing publication instead sends the next automatic launch to a fresh sibling; it never authenticates the old mount from a temporary record.
 
 ### 7.2 Private namespace reuse
 
@@ -409,12 +416,15 @@ A reusable mount visible in the current namespace may be reused without a PID re
 - persistent reuse was selected;
 - the target is the automatic hash-derived target, not a fixed path;
 - no explicit UID/GID mapping was requested;
+- namespace identities are unavailable;
 - neither `.pid` nor `.un.pid` exists;
 - the target is confirmed to be a live, readable mount.
 
 This proof is independent of whether procfs is complete, partial, or absent. It does not call `setns`. It covers older kernels and compatibility environments such as Linuxulator where `/proc/self/stat` may be readable while one or both of `/proc/self/ns/{user,mnt}` are unavailable.
 
-If a PID record exists, it must validate normally; the direct visible-mount path never bypasses a malformed or stale record. Fixed targets, explicit mappings, and private namespace mounts also retain strict record requirements.
+When namespace identities are available, the same automatic, implicit, live-mount state without either published PID record selects a fresh sibling using `transition_to_fresh_mount_target`. This handles interrupted publication, including a leftover `.pid.tmp.*`, without reading, adopting, altering, or unmounting the unverifiable target. The transition replaces the coordinator, shared lifetime lease, and exact target entries in the cleanup-directory list before normal namespace/mount creation proceeds. Requested isolation still runs on the fresh path; no fallback follows an irreversible namespace entry. The abandoned mount remains its original owner's responsibility.
+
+If a PID record exists, it must validate normally; neither the direct visible-mount path nor this recordless fallback bypasses a malformed or stale record. Fixed targets, explicit mappings, and private namespace mounts also retain strict record requirements.
 
 An unmounted but nonempty persistent target is rejected. Contents alone do not prove that the expected FUSE mount exists.
 
@@ -430,7 +440,7 @@ All namespace and FUSE branches use the same functional procfs probe: `/proc/sel
 
 ```mermaid
 flowchart TD
-    A[Need a new target] --> B{Explicit mapping or initial<br/>unshare requested?}
+    A[Need a new FUSE target] --> B{Explicit mapping or initial<br/>unshare requested?}
     B -- yes --> C[Try requested isolation]
     B -- no --> D[Check FUSE and direct-mount capability]
     C --> E{procfs available?}
@@ -442,18 +452,19 @@ flowchart TD
     H -- partial irreversible failure --> X2[Exit without fallback]
     H -- unavailable before transition<br/>and mapping explicit --> X
     H -- unavailable before transition<br/>and mapping implicit --> D
-    H -- success --> I[FUSE helper may mount directly]
+    H -- success --> D
     D --> J{/dev/fuse readable and writable?}
     J -- no --> K[Apply extraction fallback policy]
     J -- yes --> L{Can mount directly?<br/>root, existing suitable namespace,<br/>or no-proc CAP_SYS_ADMIN fallback}
     L -- yes --> M[Ensure current mount tree is private<br/>when required]
     M -- success --> I
     M -- failure --> K
-    L -- no --> N{SUID fusermount or configured<br/>FUSERMOUNT_PROG available?}
-    N -- yes --> I
+    L -- no --> N{SUID fusermount or SUID<br/>FUSERMOUNT_PROG available?}
+    N -- yes --> I[FUSE helper can attempt mounting]
     N -- no --> O[Try user plus mount or mount-only unshare]
     O -- success --> I
     O -- unavailable --> P[Install temporary fusermount shim links]
+    O -- irreversible failure --> X2
     P --> I
     K --> Q{Extraction allowed and<br/>not mount-only?}
     Q -- yes --> R[Extract-and-run]
@@ -529,7 +540,7 @@ Cache and worker defaults adapt to available memory and CPU count. When procfs m
 
 ### 9.4 Mount PID records
 
-Persistent mounts publish a trusted record after the helper is ready, except for the intentional procfs-free automatic current-namespace path. `.pid` is used for the current namespace and `.un.pid` for private namespaces.
+Persistent mounts publish a trusted record after the helper is ready, except for the intentional namespace-identity-free automatic implicit current-namespace path. `.pid` is used for the current namespace and `.un.pid` for private namespaces.
 
 If uruntime cannot identify the namespace outcome at all, it refuses to publish an untrusted record and exits. If the known outcome exists but record publication itself fails, it warns and continues the current launch.
 
@@ -540,7 +551,7 @@ If uruntime cannot identify the namespace outcome at all, it refuses to publish 
 - A mount in the current namespace prints the target directly.
 - A newly created or reused private mount prints `/proc/<helper-pid>/root<TARGET>`. If procfs is missing inside the runtime namespace, uruntime warns that the consuming outer namespace must provide procfs.
 - A reused mount prints the path and exits immediately; it does not become another cleanup owner.
-- A newly created mount installs signal handling and waits for the helper. When the helper terminates or the mount is explicitly stopped, normal mount cleanup runs.
+- A newly created mount installs signal handling and waits for the helper. Signals can trigger an unmount attempt. After the helper exits, a detached actor removes the PID record when unmounted and attempts empty-directory cleanup; mount-only does not enter delayed expiry or application-mount unmount cleanup.
 
 Mount-only never starts `AppRun` or `Run.sh`, never creates the application supervisor, and never falls back to extraction.
 
@@ -628,7 +639,7 @@ These mechanisms solve different problems:
 
 Deleting an extracted directory after a successful application launch is considered safe only when child-subreaper supervision succeeded. Procfs is useful for ordinary executable-path observation but is not complete descendant-lifetime proof: a double-fork daemon can close inherited descriptors, exec outside the target, and access target data later. If subreaper setup is unavailable, uruntime warns and retains the extracted target. This requirement does not block FUSE cleanup: the kernel rejects an ordinary unmount with `EBUSY` while the mount has active references. Reusable mounts additionally use `MNT_EXPIRE` when uruntime has `CAP_SYS_ADMIN`; an ordinary unprivileged FUSE mount cannot call `umount2(MNT_EXPIRE)` directly and instead uses the fusermount-based ordinary-unmount chain after procfs observation.
 
-`PR_SET_CHILD_SUBREAPER` errors `EINVAL`, `ENOSYS`, and `EPERM` are treated as an unavailable compatibility feature rather than an application-launch failure. Other errors are also reported. Application launch still proceeds, but successful extracted-target cleanup fails safe by retaining the target.
+`PR_SET_CHILD_SUBREAPER` errors `EINVAL`, `ENOSYS`, `EPERM`, and `EACCES` are treated as an unavailable compatibility feature rather than an application-launch failure. Other errors are also reported. Application launch still proceeds, but successful extracted-target cleanup fails safe by retaining the target.
 
 ### 12.2 Status propagation
 
@@ -674,9 +685,10 @@ stateDiagram-v2
 
     state TargetKind <<choice>>
     TargetKind --> VisibilityCheck: extraction
-    TargetKind --> NormalCleanup: FUSE mount
-    VisibilityCheck --> Retained: neither procfs nor subreaper proves completion
-    VisibilityCheck --> NormalCleanup: visibility sufficient
+    TargetKind --> NormalCleanup: application FUSE mount
+    TargetKind --> DirectoryCleanup: mount-only helper ended
+    VisibilityCheck --> Retained: complete subreaper observation unavailable
+    VisibilityCheck --> NormalCleanup: subreaper observation complete
     ImmediateCleanup --> CleanupLease
     NormalCleanup --> WaitForLifetime
     WaitForLifetime --> CleanupLease
@@ -716,7 +728,7 @@ For immediate non-delay waiting it polls until no matching executable remains or
 
 ### 15.2 Without procfs
 
-The cleanup actor waits for EOF on the application lifetime pipe, then sleeps for the requested delay when delayed checking applies. The target type then determines the final safety mechanism:
+The cleanup actor waits for EOF on the application lifetime pipe, then sleeps for the requested delay when delayed checking applies. If the pipe is absent or waiting fails, this lifetime check skips cleanup. The target type then determines the final safety mechanism:
 
 - **extraction:** before recursive deletion, the supervisor policy separately requires complete descendant visibility through the child subreaper. If the subreaper was unavailable, extraction cleanup is skipped even if inherited descriptors happened to close;
 - **FUSE mount:** descendant visibility is not a prerequisite for attempting cleanup. An ordinary unmount retains a busy mount, while a reusable mount first uses the `MNT_EXPIRE` state machine and retains the mount on active use or uncertain failure.
@@ -752,12 +764,13 @@ flowchart TD
     B -- yes, extraction --> C[Acquire exclusive cleanup lease<br/>and remove extraction immediately]
     B -- yes, mount --> D[Wait for lifetime, acquire cleanup lease,<br/>attempt ordinary unmount immediately]
     B -- no --> E{Target type}
-    E -- extraction --> F{Cleanup enabled and finite delay?}
+    E -- extraction --> F{Cleanup enabled, finite delay,<br/>and complete subreaper observation?}
     F -- no --> R[Retain extraction]
     F -- yes --> G[Wait for no use and delay]
     G --> H[Acquire coordinator plus exclusive lifetime ranges]
     H --> I[remove_dir_all target]
     E -- random non-reusable mount --> J[Wait until directory no longer used]
+    E -- mount-only helper ended --> T
     J --> K[Ordinary unmount chain]
     E -- persistent reusable mount --> L{Finite reuse delay?}
     L -- no --> R2[Retain mount]
@@ -788,7 +801,7 @@ Normal extraction cleanup requires:
 - embedded cleanup enabled;
 - `NO_CLEANUP != 1`;
 - a finite reuse delay;
-- sufficient process visibility;
+- complete descendant observation through the child subreaper;
 - exclusive target lease.
 
 Then uruntime removes the extraction recursively. Failure is nonfatal to the already completed application.
@@ -801,7 +814,7 @@ After the application tree is no longer using the target, uruntime attempts ordi
 
 ### 17.3 Persistent reusable FUSE mount
 
-A finite delay is required before cleanup. With procfs, uruntime performs the delayed process scan and then uses the ordinary unmount chain under the exclusive cleanup lease.
+A finite delay is required before cleanup. With procfs, uruntime performs the delayed process scan and acquires the exclusive cleanup lease. It then uses `MNT_EXPIRE` when effective `CAP_SYS_ADMIN` is available; otherwise it uses the ordinary unmount chain.
 
 Without procfs, after lifetime-pipe observation and exclusive lease acquisition, uruntime uses `MNT_EXPIRE` as the kernel-level inactivity guard. This path does not require child-subreaper availability.
 
@@ -854,6 +867,8 @@ For private records, a dead owner PID causes stale-record removal under the reco
 | private record malformed or identity mismatch | reject target |
 | private reuse unavailable before transition, automatic target | select fresh sibling |
 | private reuse unavailable before transition, fixed target | exit |
+| automatic implicit current-namespace mount, namespace identities available, no published PID records | select fresh sibling; leave old mount and temporary records untouched |
+| recordless current-namespace mount at a fixed target or with explicit mapping | reject; no recordless fallback |
 | expected mount absent after namespace entry | reject; no fresh fallback |
 | target directory unreadable or entry iteration fails | reject as unsafe |
 | FUSE absent before startup | extract if policy allows; otherwise exit |
@@ -862,7 +877,7 @@ For private records, a dead owner PID causes stale-record removal under the reco
 | mount-only FUSE failure | exit; never extract |
 | trusted PID record cannot be published | warn and continue current mount; future reuse may be unavailable |
 | `AppRun` or RunImage `static/bash` absent | remove runtime-owned temporary state where possible and exit |
-| application spawn fails | exit `1` after immediate inline cleanup |
+| application spawn fails | exit `1`; creator performs immediate inline cleanup, reused-target launch skips destructive cleanup |
 | extraction supervisor channel/fork fails | launch continues; a successfully launched extracted target is retained |
 | child-subreaper unsupported | launch continues; extraction is retained, while FUSE expiry/unmount remains available |
 | shared lease still held | cleanup waits and retries |
@@ -876,7 +891,7 @@ For private records, a dead owner PID causes stale-record removal under the reco
 - For extract-and-run with a supervisor, the original caller exits with the main application numeric exit code reported by that supervisor. FUSE-backed execution waits for the main application directly and returns the same numeric status.
 - Delayed cleanup runs independently and does not replace a successfully returned application status.
 - A reused-target launch skips destructive cleanup and returns the application status.
-- A spawn failure uses inline cleanup and preserves failure status `1`.
+- A creator's spawn failure uses inline cleanup and preserves failure status `1`; a reused-target spawn failure returns `1` without destructive cleanup.
 - A detached cleanup actor exits independently with `0` after its work, because the original caller has already returned the application status.
 - Mount-only reused-path reporting exits `0` immediately.
 
@@ -908,7 +923,8 @@ else if unsafe or fixed target cannot be authenticated:
     fail closed
 
 try authenticated current-namespace reuse
-or narrowly permitted procfs-free direct reuse
+or narrowly permitted namespace-identity-free direct reuse
+or fresh sibling for an automatic implicit recordless live mount
 or hash-based extraction reuse
 
 if target must be created:
@@ -925,7 +941,7 @@ explicitly unlock preparation coordinator range
 if mount-only:
     print target
     reused target -> exit
-    creator -> wait helper/signals -> cleanup
+    creator -> wait helper/signals -> detached record/empty-directory cleanup -> exit
 else:
     validate AppRun or RunImage launcher
     configure environment and portable directories
@@ -962,7 +978,7 @@ The main implementation areas in [`src/main.rs`](../src/main.rs) are:
 | raw/maintenance dispatch | `main`, `is_runtime_option`, `mfd_exec`, `add_section_data` |
 | namespace planning | `plan_unshare`, `try_unshare`, `check_fuse`, `NamespaceOutcome` |
 | authenticated namespace reuse | `MountPidRecord`, `read_validated_mount_pid_file`, `try_setns`, `try_reuse_unshare_mount_point` |
-| target policy | `existing_target_action`, `proc_free_direct_reuse_allowed`, `fresh_mount_target` |
+| target policy | `existing_target_action`, `visible_direct_reuse_allowed`, `transition_to_fresh_mount_target` |
 | records and locks | `RecordLock`, `atomic_publish_file_with`, `write_mount_pid_file` |
 | cross-launch lifetime | `LifetimeLease`, `CleanupLease`, `acquire_target_usage_lease`, `acquire_cleanup_lease` |
 | application supervision | `enable_child_subreaper`, `wait_for_all_children`, supervisor status pipe helpers |
@@ -982,7 +998,7 @@ Regression coverage is concentrated in [`src/runtime_elf_tests.rs`](../src/runti
 
 The Rust unit/regression suite runs across the release-derived feature matrix. Relevant checks include:
 
-- real `flock` contention between multiple shared users and an exclusive cleanup waiter;
+- real target-lease contention between multiple shared users and an exclusive cleanup waiter, with OFD and legacy `flock` backend policy checks;
 - lease inheritance through the application pre-exec path;
 - child-subreaper adoption and waiting for a reparented background child;
 - supervisor PID/status pipe framing;
@@ -1001,11 +1017,13 @@ The Rust harness in [`xtask/src/lifecycle.rs`](../xtask/src/lifecycle.rs) create
 
 - two overlapping users of one extraction target;
 - two overlapping users of one current-namespace reusable FUSE target;
+- interrupted current-namespace PID publication while the original application remains alive: fixed and malformed-record rejection, fresh sibling launch, independent cleanup, and unchanged original mount/temporary record;
+- automatic and fixed-target extraction fallback without FUSE, supervisor stream detachment without `/dev`, and direct FUSE mounting with only a synthetic `uid_map` procfs entry;
 - no-proc execution inside an empty-root Bubblewrap sandbox;
 - extract-and-run with explicit unshare enabled;
 - the FD-closing double-fork daemon;
 - live seccomp denial of `PR_SET_CHILD_SUBREAPER` through [`tests/fixtures/deny_subreaper.rs`](../tests/fixtures/deny_subreaper.rs);
-- fail-safe retention whenever complete subreaper visibility is unavailable, including when procfs exists.
+- fail-safe retention when subreaper visibility is denied without procfs; the mechanism tests also cover the procfs-present retention policy.
 
 Every scenario has a bounded deadline. The harness requires payload access while each application tree is alive, proves that the first overlapping cleanup cannot remove the shared target, and requires eventual target removal after the final observable application tree exits. The denied-subreaper lane instead requires the retained target and warning.
 
@@ -1022,7 +1040,7 @@ Foreign QEMU checks report the complete native lifecycle harness as `NOT RUN`; Q
 Rust `xtask` code also:
 
 - compiles the scenario payloads and generates deterministic SquashFS/DwarFS fixtures;
-- creates each fixture twice and requires byte-for-byte equality with the committed image;
+- creates each fixture twice with `fixtures --check` and requires byte-for-byte equality between the generated copies;
 - validates exact per-architecture and full-release manifests;
 - performs bounded ELF parsing and static/runtime-section policy checks;
 - rejects symlink, stale-file, oversized-input, duplicate, and malformed-metadata cases;

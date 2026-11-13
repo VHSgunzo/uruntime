@@ -741,6 +741,128 @@ where
     Ok(())
 }
 
+fn run_recordless_fuse_fallback(
+    filesystem: &str,
+    image: &Path,
+    state: &Path,
+) -> Result<(), DynError> {
+    let first_log = state.join("first.log");
+    let mut first = launch_fuse(image, state, "first", &first_log)?;
+    let ready = wait_file_from_child(
+        &state.join("first.ready"),
+        "recordless first ready marker",
+        &mut first,
+        &first_log,
+    )?;
+    let original = target_from_result(state, &ready)?;
+    let record = original.with_extension("pid");
+    let temporary = record.with_file_name(format!(
+        "{}.tmp.999999.ABCDEFGHIJKL",
+        record
+            .file_name()
+            .ok_or("PID record has no filename")?
+            .to_string_lossy()
+    ));
+    let published = fs::read(&record)?;
+    fs::rename(&record, &temporary)?;
+    let mut second = None;
+    let mut fresh = None;
+    let result: Result<(), DynError> = (|| {
+        if !process_mounts(&original) {
+            return Err(format!("{filesystem} original target is not mounted").into());
+        }
+        // Only this fixture's publication state is changed; no crash-timing race is needed.
+        for invalid in ["fixed", "pid", "un.pid"] {
+            let mut command = Command::new(image);
+            command
+                .env("TMPDIR", state.join("tmp"))
+                .env("REUSE_CHECK_DELAY", "1s")
+                .arg("fixture-image-test");
+            if invalid == "fixed" {
+                command.env("APPIMAGE_TARGET_DIR", &original);
+            } else {
+                fs::write(original.with_extension(invalid), b"malformed record\n")?;
+            }
+            let rejected =
+                bounded_command(&mut command, &format!("{filesystem} {invalid} rejection"))?;
+            if invalid != "fixed" {
+                fs::remove_file(original.with_extension(invalid))?;
+            }
+            if rejected.status.success()
+                || !String::from_utf8_lossy(&rejected.stderr).contains("refusing unsafe reuse")
+            {
+                return Err(format!("{filesystem} {invalid} target did not fail closed").into());
+            }
+        }
+        let log = state.join("second.log");
+        second = Some(launch_fuse(image, state, "second", &log)?);
+        let ready = wait_file_from_child(
+            &state.join("second.ready"),
+            "recordless fresh-target ready marker",
+            second.as_mut().ok_or("second launcher missing")?,
+            &log,
+        )?;
+        let target = target_from_result(state, &ready)?;
+        fresh = Some(target.clone());
+        if target == original
+            || !process_mounts(&target)
+            || !target.join("payload.txt").is_file()
+            || !process_mounts(&original)
+            || fs::read(&temporary)? != published
+            || record.exists()
+        {
+            return Err(format!(
+                "{filesystem} recordless fallback touched or reused the original mount"
+            )
+            .into());
+        }
+        File::create(state.join("second.release"))?;
+        wait_child(
+            second.as_mut().ok_or("second launcher missing")?,
+            "fresh-target launcher",
+        )?;
+        verify_result(&state.join("second.result"), "fresh-target result")?;
+        wait_for(
+            || {
+                !process_mounts(&target)
+                    && !target.exists()
+                    && !target.with_extension("pid").exists()
+            },
+            "fresh-target cleanup while the original is still leased",
+            WAIT_TIMEOUT,
+        )?;
+        if !process_mounts(&original) || fs::read(&temporary)? != published {
+            return Err(format!("{filesystem} fresh cleanup altered the original mount").into());
+        }
+        Ok(())
+    })();
+    // Restore this fixture's record so its original owner can clean up normally, even on RED.
+    fs::rename(&temporary, &record)?;
+    File::create(state.join("first.release"))?;
+    File::create(state.join("second.release"))?;
+    let first_status = wait_child(&mut first, "recordless original launcher");
+    let second_status = second
+        .as_mut()
+        .map(|child| wait_child(child, "recordless second launcher"));
+    let cleanup = wait_for(
+        || {
+            !process_mounts(&original)
+                && !original.exists()
+                && fresh
+                    .as_ref()
+                    .is_none_or(|target| !process_mounts(target) && !target.exists())
+        },
+        "recordless scenario final cleanup",
+        WAIT_TIMEOUT,
+    );
+    result?;
+    first_status?;
+    second_status.transpose()?;
+    cleanup?;
+    verify_result(&state.join("first.result"), "recordless original result")?;
+    Ok(())
+}
+
 fn run_daemon(
     filesystem: &str,
     image: &Path,
@@ -934,6 +1056,10 @@ pub fn run_lifecycle(runtime: &Path, target: &str, fuse_mode: FuseMode) -> Resul
                 eprintln!("PASS {filesystem} uid-map-only procfs direct FUSE launch");
                 run_overlap(filesystem, &image, &state, true, launch_fuse)?;
                 eprintln!("PASS {filesystem} current-namespace FUSE overlap");
+                let state = root.path().join(format!("{filesystem}-recordless"));
+                fs::create_dir(&state)?;
+                run_recordless_fuse_fallback(filesystem, &image, &state)?;
+                eprintln!("PASS {filesystem} recordless current-namespace fresh-target fallback");
             }
         }
     }
@@ -1033,6 +1159,37 @@ pub fn parse_lifecycle_args(args: &[String]) -> Result<(PathBuf, String, FuseMod
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires URUNTIME_LIFECYCLE_RUNTIME pointing to a full native AppImage runtime and FUSE"]
+    fn recordless_current_namespace_mount_uses_fresh_target() {
+        let runtime =
+            PathBuf::from(env::var_os("URUNTIME_LIFECYCLE_RUNTIME").expect("runtime path"));
+        let root = tempfile::Builder::new()
+            .prefix("uruntime-recordless-")
+            .tempdir()
+            .unwrap();
+        let rustc = resolve_program(Path::new("rustc"), &project_root()).unwrap();
+        let images = generate_fixtures(
+            &runtime,
+            &root.path().join("fixtures"),
+            "x86_64-unknown-linux-musl",
+            &rustc,
+        )
+        .unwrap();
+        for (filesystem, payload) in [("squashfs", images.squashfs), ("dwarfs", images.dwarfs)] {
+            let image = root.path().join(format!("{filesystem}.AppImage"));
+            append_files(&image, &runtime, &payload).unwrap();
+            let state = root.path().join(filesystem);
+            fs::create_dir(&state).unwrap();
+            run_recordless_fuse_fallback(filesystem, &image, &state).unwrap();
+            eprintln!("PASS {filesystem} recordless current-namespace fresh-target fallback");
+            let overlap = root.path().join(format!("{filesystem}-overlap"));
+            fs::create_dir(&overlap).unwrap();
+            run_overlap(filesystem, &image, &overlap, true, launch_fuse).unwrap();
+            eprintln!("PASS {filesystem} connected current-namespace FUSE overlap");
+        }
+    }
 
     #[test]
     fn bounded_output_does_not_wait_for_inherited_descriptors() {

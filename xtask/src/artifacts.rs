@@ -1184,6 +1184,6 @@ mod tests {
             &fs::read(noisy).unwrap(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("output limit"));
+        assert!(error.to_string().contains("output limit"), "{error}");
     }
 }

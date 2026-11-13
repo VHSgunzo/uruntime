@@ -64,7 +64,8 @@ The native harness builds real appended SquashFS and DwarFS AppImages from the c
 - subreaper adoption and eventual cleanup;
 - live seccomp denial of `PR_SET_CHILD_SUBREAPER`;
 - fail-safe target retention when neither procfs nor subreaper visibility exists;
-- overlapping current-namespace FUSE reuse when FUSE is available.
+- overlapping current-namespace FUSE reuse when FUSE is available;
+- fresh-target recovery from a missing published current-namespace PID record (with an orphan `.pid.tmp.*`), preserving the original live mount, rejecting fixed/malformed targets, and independently cleaning up the fresh mount.
 
 Run it directly and require FUSE:
 
@@ -74,6 +75,17 @@ cargo --locked xtask lifecycle \
   --target x86_64-unknown-linux-musl \
   --fuse=required
 ```
+
+Run only the interrupted-publication regression against a full native AppImage runtime (both filesystems, real FUSE):
+
+```sh
+CARGO_BUILD_JOBS=2 URUNTIME_LIFECYCLE_RUNTIME="$PWD/target/x86_64-unknown-linux-musl/release/uruntime" \
+  cargo --locked test --manifest-path xtask/Cargo.toml \
+  lifecycle::tests::recordless_current_namespace_mount_uses_fresh_target \
+  -- --ignored --exact --nocapture
+```
+
+This test renames only its isolated fixture's published record while its first `AppRun` waits on a barrier. It reproduces the interrupted-publication state, not a timed SIGKILL. It restores the original record and waits for both mounts to disappear, including on the baseline failure path. The same scenario runs automatically in the canonical FUSE lifecycle lane.
 
 Modes:
 

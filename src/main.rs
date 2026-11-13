@@ -4953,7 +4953,7 @@ fn main() {
         unshare_reuse_was_rejected(unshare_record_present, is_unshare_remp, true);
     let mut direct_reuse_record = None;
     if !is_unshare_remp {
-        let mounted_in_current_namespace = is_mounted(&tmp_dir).unwrap_or(false);
+        let mut mounted_in_current_namespace = is_mounted(&tmp_dir).unwrap_or(false);
         let direct_record_present = path_entry_present(&tmp_dir.with_extension("pid"));
         if should_validate_direct_reuse_record(
             persistent_reuse,
@@ -4980,6 +4980,27 @@ fn main() {
             direct_record_present,
             mounted_in_current_namespace,
         );
+        if persistent_reuse
+            && target_dir_is_empty
+            && !explicit_mapping
+            && !unshare_record_present
+            && !direct_record_present
+            && mounted_in_current_namespace
+            && !visible_direct_reuse
+        {
+            if let Err(err) = transition_to_fresh_mount_target(
+                &mut tmp_dir,
+                &mut tmp_dirs,
+                &mut target_coordinator,
+                &mut lifetime_lease,
+                lifetime_lease_enabled,
+            ) {
+                eprintln!("Failed to prepare a fresh mount target: {err}");
+                exit(1)
+            }
+            mounted_in_current_namespace = false;
+            target_nonempty = Some(false);
+        }
         let target_nonempty = if mounted_in_current_namespace {
             false
         } else {
