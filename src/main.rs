@@ -435,21 +435,104 @@ fn mfd_exec(exec_name: &str, exec_bytes: &[u8], exec_args: Vec<String>) {
     exit(1)
 }
 
+/// SquashFS superblock field offset holding the number of bytes the image
+/// actually occupies (the tail of the file may be zero padding).
+const SQUASHFS_BYTES_USED_OFFSET: u64 = 40;
+/// How far past the metadata image to look for the real payload. The image
+/// builder uses a fixed 128 KiB metadata slot, so scanning that much past the
+/// SquashFS image is sufficient without adding a SquashFS reader.
+const METADATA_PAYLOAD_SCAN_LIMIT: u64 = 128 * 1024;
+
+/// Return `(is_dwar, is_squash)` for a filesystem magic, or `None` if the
+/// bytes are not the start of an image.
+fn filesystem_kind(bytes: &[u8; 4]) -> Option<(bool, bool)> {
+    if bytes == b"DWAR" {
+        Some((true, false))
+    } else if bytes == b"hsqs" {
+        Some((false, true))
+    } else {
+        None
+    }
+}
+
+/// If `offset` points at a SquashFS image and another filesystem image follows
+/// it, return the offset of that following image.
+///
+/// The first image is treated as a metadata sidecar (for example, a tiny
+/// SquashFS carrying `.DirIcon` and the desktop entry for thumbnailers and
+/// desktop integration tools). The runtime itself must launch the second,
+/// complete image, otherwise it would try to run `AppRun` from the metadata
+/// image.
+fn payload_offset_after_metadata(executable: &SelfExecutable, offset: u64) -> Result<Option<u64>> {
+    let mut bytes_used_raw = [0u8; 8];
+    if executable
+        .file
+        .read_at(&mut bytes_used_raw, offset + SQUASHFS_BYTES_USED_OFFSET)?
+        != bytes_used_raw.len()
+    {
+        return Ok(None);
+    }
+    let bytes_used = u64::from_le_bytes(bytes_used_raw);
+    // A superblock alone is 96 bytes; reject nonsense before doing arithmetic.
+    if bytes_used < 96 {
+        return Ok(None);
+    }
+    let Some(scan_start) = offset.checked_add(bytes_used) else {
+        return Ok(None);
+    };
+
+    let mut window = vec![0u8; METADATA_PAYLOAD_SCAN_LIMIT as usize];
+    let read = executable.file.read_at(&mut window, scan_start)?;
+    window.truncate(read);
+
+    for pos in 0..window.len().saturating_sub(3) {
+        let magic: [u8; 4] = window[pos..pos + 4].try_into().unwrap_or_default();
+        if filesystem_kind(&magic).is_some() {
+            return Ok(Some(scan_start + pos as u64));
+        }
+    }
+    Ok(None)
+}
+
 fn get_image(executable: &SelfExecutable, offset: u64) -> Result<Image> {
+    let mut image_offset = offset;
     let mut buff = [0u8; 4];
-    let bytes_read = executable.file.read_at(&mut buff, offset)?;
+    let mut bytes_read = executable.file.read_at(&mut buff, image_offset)?;
+
+    // A leading SquashFS may be a metadata sidecar. Prefer the filesystem
+    // image that follows it, which is the actual application payload.
+    if bytes_read == 4 && buff == *b"hsqs" {
+        if let Some(payload_offset) = payload_offset_after_metadata(executable, offset)? {
+            let mut payload_magic = [0u8; 4];
+            if executable
+                .file
+                .read_at(&mut payload_magic, payload_offset)?
+                == 4
+                && filesystem_kind(&payload_magic).is_some()
+            {
+                if get_env_var!("URUNTIME_DEBUG_METADATA") == "1" {
+                    eprintln!(
+                        "uruntime: skipping metadata image at {offset}, using payload at {payload_offset}"
+                    );
+                }
+                image_offset = payload_offset;
+                buff = payload_magic;
+                bytes_read = 4;
+            }
+        }
+    }
+
     let mut image = Image {
         file: executable.file.try_clone()?,
         path: executable.location.clone(),
-        offset,
+        offset: image_offset,
         is_dwar: false,
         is_squash: false,
     };
     if bytes_read == 4 {
-        if buff == *b"DWAR" {
-            image.is_dwar = true
-        } else if buff == *b"hsqs" {
-            image.is_squash = true
+        if let Some((is_dwar, is_squash)) = filesystem_kind(&buff) {
+            image.is_dwar = is_dwar;
+            image.is_squash = is_squash;
         }
     }
     if !image.is_squash && !image.is_dwar {
