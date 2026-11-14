@@ -778,7 +778,8 @@ fn reusable_mount_hash_separates_explicit_mappings_and_preserves_implicit_key() 
 
 #[test]
 fn reusable_mount_base_hash_wraps_without_panicking() {
-    assert_eq!(base_hash(u64::from(u32::MAX), 1, 1), 1);
+    assert_eq!(base_hash(u64::from(u32::MAX), 1, 0, 1), 1);
+    assert_eq!(base_hash(u64::from(u32::MAX), 0, 1, 1), 1);
 }
 
 #[test]
@@ -2813,7 +2814,6 @@ fn runtime_boundary_points_to_squashfs_and_dwarfs_magic() {
                 "VALUE=1"
             );
             let image = get_image(&executable, runtime.size).unwrap();
-            assert_eq!(image.is_squash, magic == b"hsqs");
             assert_eq!(image.is_dwar, magic == b"DWAR");
             assert_eq!(
                 fast_hash_file(&image.file, executable.size, image.offset).unwrap(),
@@ -2832,4 +2832,210 @@ fn runtime_boundary_points_to_squashfs_and_dwarfs_magic() {
             assert!(image.helper_path_with_fd_roots(&[&missing_proc]).is_err());
         }
     }
+}
+
+const TEST_IMAGE_OFFSET: usize = 0x380;
+const TEST_METADATA_SLOT_SIZE: usize = 128 * 1024;
+const TEST_METADATA_BYTES_USED: u64 = 4100;
+
+fn write_squashfs_superblock(bytes: &mut [u8], offset: usize, bytes_used: u64) {
+    bytes[offset..offset + 4].copy_from_slice(b"hsqs");
+    bytes[offset + 4..offset + 8].copy_from_slice(&1u32.to_le_bytes());
+    bytes[offset + 12..offset + 16].copy_from_slice(&131_072u32.to_le_bytes());
+    bytes[offset + 20..offset + 22].copy_from_slice(&6u16.to_le_bytes());
+    bytes[offset + 28..offset + 30].copy_from_slice(&4u16.to_le_bytes());
+    bytes[offset + 30..offset + 32].copy_from_slice(&0u16.to_le_bytes());
+    bytes[offset + 40..offset + 48].copy_from_slice(&bytes_used.to_le_bytes());
+}
+
+fn image_with_metadata_slot(payload: &[u8]) -> Vec<u8> {
+    let mut bytes = fixture(Endian::Little);
+    bytes.truncate(TEST_IMAGE_OFFSET);
+    bytes.resize(TEST_IMAGE_OFFSET + 96, 0);
+    write_squashfs_superblock(&mut bytes, TEST_IMAGE_OFFSET, TEST_METADATA_BYTES_USED);
+    let payload_start = TEST_IMAGE_OFFSET + TEST_METADATA_SLOT_SIZE;
+    bytes.resize(payload_start + payload.len(), 0);
+    bytes[payload_start..].copy_from_slice(payload);
+    bytes
+}
+
+fn selected_image(bytes: &[u8]) -> (u64, bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image");
+    std::fs::write(&path, bytes).unwrap();
+    let executable = SelfExecutable::open_path(&path).unwrap();
+    let image = get_image(&executable, TEST_IMAGE_OFFSET as u64).unwrap();
+    (image.offset, image.is_dwar)
+}
+
+#[test]
+fn valid_single_squashfs_is_not_treated_as_metadata() {
+    let mut bytes = fixture(Endian::Little);
+    write_squashfs_superblock(&mut bytes, TEST_IMAGE_OFFSET, 4100);
+
+    let (offset, is_dwar) = selected_image(&bytes);
+    assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
+    assert!(!is_dwar);
+}
+
+#[test]
+fn trailer_text_with_dwar_is_not_selected_as_a_payload() {
+    let mut bytes = fixture(Endian::Little);
+    write_squashfs_superblock(&mut bytes, TEST_IMAGE_OFFSET, 4100);
+    bytes.resize(TEST_IMAGE_OFFSET + TEST_METADATA_SLOT_SIZE + 8, 0);
+    let trailer = b"Package note: DWAR is an abbreviation, not a filesystem.";
+    let trailer_start = TEST_IMAGE_OFFSET + 4100;
+    bytes[trailer_start..trailer_start + trailer.len()].copy_from_slice(trailer);
+
+    let (offset, is_dwar) = selected_image(&bytes);
+    assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
+    assert!(!is_dwar);
+}
+
+#[test]
+fn trailer_text_at_the_slot_boundary_is_not_selected_as_a_payload() {
+    let mut bytes = fixture(Endian::Little);
+    write_squashfs_superblock(&mut bytes, TEST_IMAGE_OFFSET, 4100);
+    let trailer = b"Package note: DWAR is an abbreviation, not a filesystem.";
+    let trailer_start = TEST_IMAGE_OFFSET + TEST_METADATA_SLOT_SIZE;
+    bytes.resize(trailer_start + trailer.len(), 0);
+    bytes[trailer_start..].copy_from_slice(trailer);
+
+    let (offset, is_dwar) = selected_image(&bytes);
+    assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
+    assert!(!is_dwar);
+}
+
+#[test]
+#[cfg(feature = "dwarfs")]
+fn metadata_slot_selects_following_dwarfs_payload() {
+    let bytes = image_with_metadata_slot(b"DWARFS\x02\x05\x00\x00");
+
+    let (offset, is_dwar) = selected_image(&bytes);
+    assert_eq!(offset, (TEST_IMAGE_OFFSET + TEST_METADATA_SLOT_SIZE) as u64);
+    assert!(is_dwar);
+}
+
+#[test]
+fn squashfs_payload_after_metadata_slot_keeps_the_metadata_squashfs() {
+    let mut payload = vec![0u8; 96];
+    write_squashfs_superblock(&mut payload, 0, 96);
+    let bytes = image_with_metadata_slot(&payload);
+
+    let (offset, is_dwar) = selected_image(&bytes);
+    assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
+    assert!(!is_dwar);
+}
+
+#[test]
+fn invalid_payload_keeps_the_metadata_squashfs() {
+    let bytes = image_with_metadata_slot(b"not a filesystem");
+
+    let (offset, is_dwar) = selected_image(&bytes);
+    assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
+    assert!(!is_dwar);
+}
+
+#[test]
+fn non_zero_metadata_padding_keeps_the_first_squashfs() {
+    let mut bytes = image_with_metadata_slot(b"DWARFS\x02\x05\x00\x00");
+    bytes[TEST_IMAGE_OFFSET + TEST_METADATA_BYTES_USED as usize] = 1;
+
+    let (offset, is_dwar) = selected_image(&bytes);
+    assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
+    assert!(!is_dwar);
+}
+
+#[test]
+fn unsupported_dwarfs_version_keeps_the_metadata_squashfs() {
+    let bytes = image_with_metadata_slot(b"DWARFS\x03\x00\x00\x00");
+
+    let (offset, is_dwar) = selected_image(&bytes);
+    assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
+    assert!(!is_dwar);
+}
+
+#[test]
+#[cfg(not(feature = "dwarfs"))]
+fn unsupported_dwarfs_payload_keeps_the_metadata_squashfs() {
+    let bytes = image_with_metadata_slot(b"DWARFS\x02\x05\x00\x00");
+
+    let (offset, is_dwar) = selected_image(&bytes);
+    assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
+    assert!(!is_dwar);
+}
+
+fn selected_image_hash(bytes: &[u8]) -> (u64, bool, u32) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image");
+    std::fs::write(&path, bytes).unwrap();
+    let executable = SelfExecutable::open_path(&path).unwrap();
+    let image = get_image(&executable, TEST_IMAGE_OFFSET as u64).unwrap();
+    (image.offset, image.is_dwar, image.metadata_hash)
+}
+
+#[test]
+#[cfg(feature = "dwarfs")]
+fn metadata_content_changes_the_reuse_identity() {
+    let payload = b"DWARFS\x02\x05\x00\x00";
+    let first = image_with_metadata_slot(payload);
+    let mut second = first.clone();
+    second[TEST_IMAGE_OFFSET + 1000] ^= 0xff;
+
+    let (_, first_is_dwar, first_metadata_hash) = selected_image_hash(&first);
+    let (_, second_is_dwar, second_metadata_hash) = selected_image_hash(&second);
+
+    assert!(first_is_dwar);
+    assert!(second_is_dwar);
+    assert_ne!(first_metadata_hash, second_metadata_hash);
+
+    let mapping = IdMapping {
+        uid: 1000,
+        gid: 1000,
+    };
+    let first_key = super::hash_string(&reuse_hash_material(
+        u64::from(base_hash(0x1234, 0x5678, first_metadata_hash, 1000)),
+        mapping,
+        false,
+    ));
+    let second_key = super::hash_string(&reuse_hash_material(
+        u64::from(base_hash(0x1234, 0x5678, second_metadata_hash, 1000)),
+        mapping,
+        false,
+    ));
+    assert_ne!(first_key, second_key);
+}
+
+#[test]
+fn no_sidecar_reuse_identity_is_unchanged() {
+    let mut bytes = fixture(Endian::Little);
+    bytes[TEST_IMAGE_OFFSET..TEST_IMAGE_OFFSET + 4].copy_from_slice(b"DWAR");
+
+    let (offset, is_dwar, metadata_hash) = selected_image_hash(&bytes);
+    assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
+    assert!(is_dwar);
+    assert_eq!(metadata_hash, 0);
+
+    let runtime_hash = 0x1234_u64;
+    let image_hash = 0x5678_u32;
+    let uid = 1000_u32;
+    let legacy_base = (runtime_hash as u32)
+        .wrapping_add(image_hash)
+        .wrapping_add(uid);
+    assert_eq!(
+        base_hash(runtime_hash, image_hash, metadata_hash, uid),
+        legacy_base
+    );
+
+    let mapping = IdMapping {
+        uid: 1000,
+        gid: 1000,
+    };
+    let key = super::hash_string(&reuse_hash_material(
+        u64::from(base_hash(runtime_hash, image_hash, metadata_hash, uid)),
+        mapping,
+        false,
+    ));
+    let control = super::hash_string(&reuse_hash_material(u64::from(legacy_base), mapping, false));
+    assert_eq!(key, control);
 }

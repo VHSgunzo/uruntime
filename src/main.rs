@@ -236,8 +236,8 @@ struct Image {
     file: File,
     path: PathBuf,
     offset: u64,
-    is_squash: bool,
     is_dwar: bool,
+    metadata_hash: u32,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -435,27 +435,193 @@ fn mfd_exec(exec_name: &str, exec_bytes: &[u8], exec_args: Vec<String>) {
     exit(1)
 }
 
-fn get_image(executable: &SelfExecutable, offset: u64) -> Result<Image> {
-    let mut buff = [0u8; 4];
-    let bytes_read = executable.file.read_at(&mut buff, offset)?;
-    let mut image = Image {
-        file: executable.file.try_clone()?,
-        path: executable.location.clone(),
-        offset,
-        is_dwar: false,
-        is_squash: false,
+/// Size of the fixed metadata slot that may sit between the runtime and the
+/// application payload.
+///
+/// A builder that wants SquashFS thumbnailers to see AppImage metadata writes
+/// a small SquashFS image at the ELF boundary and zero-pads it to this size.
+/// The application payload starts immediately after the slot.
+///
+/// The slot is fixed so the payload offset does not move when the metadata
+/// image changes. This gives the builder and runtime a deterministic payload
+/// location and keeps the format's offset contract stable.
+const METADATA_SLOT_SIZE: u64 = 128 * 1024;
+
+/// SquashFS superblock size and the offset of its little-endian `bytes_used`
+/// field. `bytes_used` is the number of bytes the image actually occupies; a
+/// metadata slot zero-pads the remainder up to `METADATA_SLOT_SIZE`.
+const SQUASHFS_SUPERBLOCK_SIZE: usize = 96;
+const SQUASHFS_BYTES_USED_OFFSET: usize = 40;
+const SQUASHFS_MAGIC: &[u8; 4] = b"hsqs";
+const SQUASHFS_MAJOR_VERSION: u16 = 4;
+const SQUASHFS_MINOR_VERSION: u16 = 0;
+const SQUASHFS_BLOCK_SIZE_MIN: u32 = 4 * 1024;
+const SQUASHFS_BLOCK_SIZE_MAX: u32 = 1024 * 1024;
+
+/// DwarFS file header: six magic bytes followed by the major and minor
+/// version. The bundled DwarFS helper accepts these versions.
+const DWARFS_MAGIC: &[u8; 6] = b"DWARFS";
+const DWARFS_HEADER_SIZE: usize = 8;
+const DWARFS_MAJOR_VERSION: u8 = 2;
+const DWARFS_MINOR_VERSION_MAX: u8 = 6;
+
+/// Return `(is_dwar, is_squash)` for a filesystem magic, or `None` if the
+/// bytes are not the start of an image.
+fn filesystem_kind(bytes: &[u8; 4]) -> Option<(bool, bool)> {
+    if bytes == b"DWAR" {
+        Some((true, false))
+    } else if bytes == b"hsqs" {
+        Some((false, true))
+    } else {
+        None
+    }
+}
+
+fn is_valid_dwarfs_header(bytes: &[u8]) -> bool {
+    bytes.len() >= DWARFS_HEADER_SIZE
+        && &bytes[0..6] == DWARFS_MAGIC
+        && bytes[6] == DWARFS_MAJOR_VERSION
+        && bytes[7] <= DWARFS_MINOR_VERSION_MAX
+}
+
+/// Validate a SquashFS 4.0 superblock and return its `bytes_used` value.
+fn parse_squashfs_superblock(bytes: &[u8], file_size: u64, offset: u64) -> Option<u64> {
+    if bytes.len() < SQUASHFS_SUPERBLOCK_SIZE || &bytes[0..4] != SQUASHFS_MAGIC {
+        return None;
+    }
+    let inodes = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    let block_size = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
+    let compression = u16::from_le_bytes(bytes[20..22].try_into().ok()?);
+    let major = u16::from_le_bytes(bytes[28..30].try_into().ok()?);
+    let minor = u16::from_le_bytes(bytes[30..32].try_into().ok()?);
+    let bytes_used = u64::from_le_bytes(
+        bytes[SQUASHFS_BYTES_USED_OFFSET..SQUASHFS_BYTES_USED_OFFSET + 8]
+            .try_into()
+            .ok()?,
+    );
+
+    if major != SQUASHFS_MAJOR_VERSION
+        || minor != SQUASHFS_MINOR_VERSION
+        || inodes == 0
+        || !block_size.is_power_of_two()
+        || !(SQUASHFS_BLOCK_SIZE_MIN..=SQUASHFS_BLOCK_SIZE_MAX).contains(&block_size)
+        || !(1..=6).contains(&compression)
+        || bytes_used < SQUASHFS_SUPERBLOCK_SIZE as u64
+        || offset.checked_add(bytes_used)? > file_size
+    {
+        return None;
+    }
+    Some(bytes_used)
+}
+
+/// Return the payload offset when `offset` starts a valid fixed-size metadata
+/// slot followed by a DwarFS application payload.
+///
+/// Layout:
+///
+/// ```text
+/// offset                                  metadata SquashFS
+/// offset + bytes_used .. offset + 128 KiB zero padding
+/// offset + 128 KiB                        DwarFS payload
+/// ```
+///
+/// The metadata image must be a SquashFS 4.0 filesystem whose `bytes_used`
+/// value fits in the slot, and the padding must be zero. The DwarFS payload
+/// header is also validated, so arbitrary trailer text that happens to contain
+/// a magic sequence is never selected.
+fn payload_offset_after_metadata(
+    executable: &SelfExecutable,
+    offset: u64,
+) -> Result<Option<(u64, u32)>> {
+    let mut superblock = [0u8; SQUASHFS_SUPERBLOCK_SIZE];
+    if executable.file.read_at(&mut superblock, offset)? != superblock.len() {
+        return Ok(None);
+    }
+    let Some(bytes_used) = parse_squashfs_superblock(&superblock, executable.size, offset) else {
+        return Ok(None);
     };
+    if bytes_used > METADATA_SLOT_SIZE {
+        return Ok(None);
+    }
+    let Some(payload_offset) = offset.checked_add(METADATA_SLOT_SIZE) else {
+        return Ok(None);
+    };
+    if payload_offset > executable.size {
+        return Ok(None);
+    }
+
+    let mut header = [0u8; DWARFS_HEADER_SIZE];
+    let read = executable.file.read_at(&mut header, payload_offset)?;
+    if !is_valid_dwarfs_header(&header[..read]) {
+        return Ok(None);
+    }
+
+    let Some(padding_start) = offset.checked_add(bytes_used) else {
+        return Ok(None);
+    };
+    let Ok(padding_len) = usize::try_from(payload_offset - padding_start) else {
+        return Ok(None);
+    };
+    let mut padding = vec![0u8; padding_len];
+    if executable.file.read_at(&mut padding, padding_start)? != padding_len
+        || padding.iter().any(|byte| *byte != 0)
+    {
+        return Ok(None);
+    }
+
+    let Ok(metadata_len) = usize::try_from(bytes_used) else {
+        return Ok(None);
+    };
+    let mut metadata = vec![0u8; metadata_len];
+    if executable.file.read_at(&mut metadata, offset)? != metadata_len {
+        return Ok(None);
+    }
+    Ok(Some((payload_offset, xxh3_64(&metadata) as u32)))
+}
+
+fn get_image(executable: &SelfExecutable, offset: u64) -> Result<Image> {
+    let mut image_offset = offset;
+    let mut is_dwar = false;
+    let mut is_squash = false;
+    let mut metadata_hash = 0;
+
+    let mut buff = [0u8; 4];
+    let bytes_read = executable.file.read_at(&mut buff, image_offset)?;
     if bytes_read == 4 {
-        if buff == *b"DWAR" {
-            image.is_dwar = true
-        } else if buff == *b"hsqs" {
-            image.is_squash = true
+        if let Some((dwar, squash)) = filesystem_kind(&buff) {
+            is_dwar = dwar;
+            is_squash = squash;
         }
     }
-    if !image.is_squash && !image.is_dwar {
+
+    // A leading SquashFS may be a metadata slot. Only switch to the following
+    // image when the slot layout and DwarFS payload header validate and this
+    // build includes DwarFS support.
+    if cfg!(feature = "dwarfs") && is_squash {
+        if let Some((payload_offset, hash)) = payload_offset_after_metadata(executable, offset)? {
+            if get_env_var!("URUNTIME_DEBUG_METADATA") == "1" {
+                eprintln!(
+                    "uruntime: skipping metadata image at {offset}, using payload at {payload_offset}"
+                );
+            }
+            image_offset = payload_offset;
+            metadata_hash = hash;
+            is_dwar = true;
+            is_squash = false;
+        }
+    }
+
+    if !is_squash && !is_dwar {
         return Err(Error::new(NotFound, "SquashFS or DwarFS image not found!"));
     }
-    Ok(image)
+
+    Ok(Image {
+        file: executable.file.try_clone()?,
+        path: executable.location.clone(),
+        offset: image_offset,
+        is_dwar,
+        metadata_hash,
+    })
 }
 
 fn add_to_path(path: &PathBuf) {
@@ -1282,9 +1448,10 @@ fn reuse_hash_material(base: u64, mapping: IdMapping, explicit: bool) -> String 
     }
 }
 
-fn base_hash(runtime_hash: u64, image_hash: u32, uid: u32) -> u32 {
+fn base_hash(runtime_hash: u64, image_hash: u32, metadata_hash: u32, uid: u32) -> u32 {
     (runtime_hash as u32)
         .wrapping_add(image_hash)
+        .wrapping_add(metadata_hash)
         .wrapping_add(uid)
 }
 
@@ -4813,7 +4980,12 @@ fn main() {
                     eprintln!("Failed to get image hash: {err}");
                     exit(1)
                 });
-            let base_hash = base_hash(xxh3_64(&runtime.headers_bytes), image_hash, uid);
+            let base_hash = base_hash(
+                xxh3_64(&runtime.headers_bytes),
+                image_hash,
+                image.metadata_hash,
+                uid,
+            );
             self_hash = hash_string(&reuse_hash_material(
                 u64::from(base_hash),
                 requested_mapping,
