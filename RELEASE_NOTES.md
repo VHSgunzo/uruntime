@@ -1,7 +1,8 @@
-## uruntime v0.8.2
+## uruntime v0.8.3
 
-- Recover automatic mounts after interrupted PID-record publication (#28).
-- Fix helper-execution aborts without `/proc` and after failed exec.
-- Update bundled DwarFS to 0.15.8 and squashfuse to 0.6.5.
+- Add metadata SquashFS sidecars so DwarFS AppImages expose icons and desktop entries to SquashFS-only tools (#29).
+- Invalidate reusable targets when sidecar metadata changes.
 
-[Full changelog](https://github.com/VHSgunzo/uruntime/blob/v0.8.2/CHANGELOG.md).
+The new layout uses a fixed 128 KiB metadata slot. Existing single-image layouts remain supported. See the [builder requirements](https://github.com/VHSgunzo/uruntime/blob/v0.8.3/docs/METADATA_SIDECAR.md).
+
+[Full changelog](https://github.com/VHSgunzo/uruntime/blob/v0.8.3/CHANGELOG.md).

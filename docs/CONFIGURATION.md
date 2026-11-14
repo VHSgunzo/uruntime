@@ -105,6 +105,7 @@ In the tables below, `<ENV>` means `APPIMAGE` or `RUNIMAGE`.
 | `REUSE_CHECK_DELAY=5s` | Wait before checking whether a target is still in use. Accepts integer seconds or one `s`, `m`, or `h` suffix; `inf` disables expiry and `0` disables reuse. An invalid value produces a one-second delay. |
 | `FUSERMOUNT_PROG=/path` | Explicit path to a SUID `fusermount` or `fusermount3`. |
 | `ENABLE_FUSE_DEBUG=1` | Enable debug output from the selected FUSE helper. |
+| `URUNTIME_DEBUG_METADATA=1` | Print metadata and payload offsets to stderr when a [metadata sidecar](METADATA_SIDECAR.md) is selected. |
 | `TARGET_<ENV>=/path` | Perform a maintenance operation on another image instead of the runtime itself. |
 | `NO_MEMFDEXEC=1` | Run an extracted helper through a temporary executable file instead of `memfd`. |
 

@@ -198,6 +198,18 @@ Fallback from a failed mount reexecutes the retained runtime using:
 
 An unrelated replacement at the original pathname is never intentionally executed.
 
+### 4.4 Selecting the application filesystem
+
+Ordinary images begin at the ELF boundary. With DwarFS support, a leading
+SquashFS may instead be a [metadata sidecar](METADATA_SIDECAR.md): the runtime
+checks its superblock, zero padding to the fixed 128 KiB slot boundary, and the
+DwarFS payload header before selecting the second filesystem. Failed layout
+validation or a build without DwarFS support retains the first SquashFS.
+
+Mount and extraction helpers receive the selected payload offset on the same
+retained file. The images are not merged. The offset CLI and `APPOFFSET` or
+`RUNOFFSET` still expose the first filesystem for integration tools.
+
 ## 5. Configuration and mode resolution
 
 The embedded strings in the runtime are evaluated together with CLI and environment requests.
@@ -262,7 +274,8 @@ Capabilities are dropped only in the application child's pre-exec hook and only 
 Automatic extraction and persistent FUSE targets use a stable hash derived from:
 
 - runtime ELF-header bytes;
-- sampled appended-image content;
+- sampled content of the selected application filesystem;
+- the full metadata SquashFS content when a sidecar is selected;
 - current UID;
 - requested UID/GID values and explicit-mapping intent when mapping was explicitly requested.
 

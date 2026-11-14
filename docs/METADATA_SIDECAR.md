@@ -37,6 +37,12 @@ do not need this layout.
 - The metadata image should carry `.DirIcon`, the desktop entry, and a stub
   `AppRun` for tools that expect a SquashFS AppImage.
 
+Use a compact original SVG when available. Otherwise optimize or downscale the
+PNG used for the preview; the full-size application icon can remain in DwarFS.
+Check the finished SquashFS `bytes_used`, including filesystem overhead, and
+reject oversized metadata before appending it. Pixel dimensions alone do not
+guarantee that the image fits. The runtime does not build or resize the sidecar.
+
 ## Offsets
 
 `--appimage-offset`, `APPOFFSET`, and `RUNOFFSET` point at the metadata
@@ -52,3 +58,15 @@ boundary.
 
 If the metadata superblock, the zero padding, or the DwarFS payload header do
 not validate, the runtime also keeps ordinary single-SquashFS behavior.
+
+## Reuse identity and diagnostics
+
+For a selected sidecar layout, the runtime hashes all metadata SquashFS bytes
+up to `bytes_used` with XXH3 and includes the result in the reusable mount and
+extraction key, alongside the ELF and sampled application-payload hashes.
+Changing metadata therefore invalidates reuse without changing the payload.
+Ordinary images have no metadata contribution and retain their existing key
+formula. These are noncryptographic cache keys, not integrity checks.
+
+Set `URUNTIME_DEBUG_METADATA=1` to print the metadata and selected payload
+offsets to standard error when a sidecar is selected.
