@@ -3016,19 +3016,26 @@ fn no_sidecar_reuse_identity_is_unchanged() {
     assert!(is_dwar);
     assert_eq!(metadata_hash, 0);
 
+    let runtime_hash = 0x1234_u64;
+    let image_hash = 0x5678_u32;
+    let uid = 1000_u32;
+    let legacy_base = (runtime_hash as u32)
+        .wrapping_add(image_hash)
+        .wrapping_add(uid);
+    assert_eq!(
+        base_hash(runtime_hash, image_hash, metadata_hash, uid),
+        legacy_base
+    );
+
     let mapping = IdMapping {
         uid: 1000,
         gid: 1000,
     };
     let key = super::hash_string(&reuse_hash_material(
-        u64::from(base_hash(0x1234, 0x5678, metadata_hash, 1000)),
+        u64::from(base_hash(runtime_hash, image_hash, metadata_hash, uid)),
         mapping,
         false,
     ));
-    let control = super::hash_string(&reuse_hash_material(
-        u64::from(base_hash(0x1234, 0x5678, 0, 1000)),
-        mapping,
-        false,
-    ));
+    let control = super::hash_string(&reuse_hash_material(u64::from(legacy_base), mapping, false));
     assert_eq!(key, control);
 }
