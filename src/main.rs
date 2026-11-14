@@ -443,8 +443,8 @@ fn mfd_exec(exec_name: &str, exec_bytes: &[u8], exec_args: Vec<String>) {
 /// The application payload starts immediately after the slot.
 ///
 /// The slot is fixed so the payload offset does not move when the metadata
-/// image changes. zsync compares fixed-size blocks; a moving payload would
-/// make almost everything look changed and force large downloads.
+/// image changes. This gives the builder and runtime a deterministic payload
+/// location and keeps the format's offset contract stable.
 const METADATA_SLOT_SIZE: u64 = 128 * 1024;
 
 /// SquashFS superblock size and the offset of its little-endian `bytes_used`
