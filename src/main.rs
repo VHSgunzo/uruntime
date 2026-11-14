@@ -237,6 +237,7 @@ struct Image {
     path: PathBuf,
     offset: u64,
     is_dwar: bool,
+    metadata_hash: u32,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -528,7 +529,10 @@ fn parse_squashfs_superblock(bytes: &[u8], file_size: u64, offset: u64) -> Optio
 /// value fits in the slot, and the padding must be zero. The DwarFS payload
 /// header is also validated, so arbitrary trailer text that happens to contain
 /// a magic sequence is never selected.
-fn payload_offset_after_metadata(executable: &SelfExecutable, offset: u64) -> Result<Option<u64>> {
+fn payload_offset_after_metadata(
+    executable: &SelfExecutable,
+    offset: u64,
+) -> Result<Option<(u64, u32)>> {
     let mut superblock = [0u8; SQUASHFS_SUPERBLOCK_SIZE];
     if executable.file.read_at(&mut superblock, offset)? != superblock.len() {
         return Ok(None);
@@ -565,13 +569,21 @@ fn payload_offset_after_metadata(executable: &SelfExecutable, offset: u64) -> Re
         return Ok(None);
     }
 
-    Ok(Some(payload_offset))
+    let Ok(metadata_len) = usize::try_from(bytes_used) else {
+        return Ok(None);
+    };
+    let mut metadata = vec![0u8; metadata_len];
+    if executable.file.read_at(&mut metadata, offset)? != metadata_len {
+        return Ok(None);
+    }
+    Ok(Some((payload_offset, xxh3_64(&metadata) as u32)))
 }
 
 fn get_image(executable: &SelfExecutable, offset: u64) -> Result<Image> {
     let mut image_offset = offset;
     let mut is_dwar = false;
     let mut is_squash = false;
+    let mut metadata_hash = 0;
 
     let mut buff = [0u8; 4];
     let bytes_read = executable.file.read_at(&mut buff, image_offset)?;
@@ -586,13 +598,14 @@ fn get_image(executable: &SelfExecutable, offset: u64) -> Result<Image> {
     // image when the slot layout and DwarFS payload header validate and this
     // build includes DwarFS support.
     if cfg!(feature = "dwarfs") && is_squash {
-        if let Some(payload_offset) = payload_offset_after_metadata(executable, offset)? {
+        if let Some((payload_offset, hash)) = payload_offset_after_metadata(executable, offset)? {
             if get_env_var!("URUNTIME_DEBUG_METADATA") == "1" {
                 eprintln!(
                     "uruntime: skipping metadata image at {offset}, using payload at {payload_offset}"
                 );
             }
             image_offset = payload_offset;
+            metadata_hash = hash;
             is_dwar = true;
             is_squash = false;
         }
@@ -607,6 +620,7 @@ fn get_image(executable: &SelfExecutable, offset: u64) -> Result<Image> {
         path: executable.location.clone(),
         offset: image_offset,
         is_dwar,
+        metadata_hash,
     })
 }
 
@@ -1434,9 +1448,10 @@ fn reuse_hash_material(base: u64, mapping: IdMapping, explicit: bool) -> String 
     }
 }
 
-fn base_hash(runtime_hash: u64, image_hash: u32, uid: u32) -> u32 {
+fn base_hash(runtime_hash: u64, image_hash: u32, metadata_hash: u32, uid: u32) -> u32 {
     (runtime_hash as u32)
         .wrapping_add(image_hash)
+        .wrapping_add(metadata_hash)
         .wrapping_add(uid)
 }
 
@@ -4965,7 +4980,12 @@ fn main() {
                     eprintln!("Failed to get image hash: {err}");
                     exit(1)
                 });
-            let base_hash = base_hash(xxh3_64(&runtime.headers_bytes), image_hash, uid);
+            let base_hash = base_hash(
+                xxh3_64(&runtime.headers_bytes),
+                image_hash,
+                image.metadata_hash,
+                uid,
+            );
             self_hash = hash_string(&reuse_hash_material(
                 u64::from(base_hash),
                 requested_mapping,

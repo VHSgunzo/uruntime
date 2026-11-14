@@ -778,7 +778,8 @@ fn reusable_mount_hash_separates_explicit_mappings_and_preserves_implicit_key() 
 
 #[test]
 fn reusable_mount_base_hash_wraps_without_panicking() {
-    assert_eq!(base_hash(u64::from(u32::MAX), 1, 1), 1);
+    assert_eq!(base_hash(u64::from(u32::MAX), 1, 0, 1), 1);
+    assert_eq!(base_hash(u64::from(u32::MAX), 0, 1, 1), 1);
 }
 
 #[test]
@@ -2962,4 +2963,72 @@ fn unsupported_dwarfs_payload_keeps_the_metadata_squashfs() {
     let (offset, is_dwar) = selected_image(&bytes);
     assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
     assert!(!is_dwar);
+}
+
+fn selected_image_hash(bytes: &[u8]) -> (u64, bool, u32) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image");
+    std::fs::write(&path, bytes).unwrap();
+    let executable = SelfExecutable::open_path(&path).unwrap();
+    let image = get_image(&executable, TEST_IMAGE_OFFSET as u64).unwrap();
+    (image.offset, image.is_dwar, image.metadata_hash)
+}
+
+#[test]
+#[cfg(feature = "dwarfs")]
+fn metadata_content_changes_the_reuse_identity() {
+    let payload = b"DWARFS\x02\x05\x00\x00";
+    let first = image_with_metadata_slot(payload);
+    let mut second = first.clone();
+    second[TEST_IMAGE_OFFSET + 1000] ^= 0xff;
+
+    let (_, first_is_dwar, first_metadata_hash) = selected_image_hash(&first);
+    let (_, second_is_dwar, second_metadata_hash) = selected_image_hash(&second);
+
+    assert!(first_is_dwar);
+    assert!(second_is_dwar);
+    assert_ne!(first_metadata_hash, second_metadata_hash);
+
+    let mapping = IdMapping {
+        uid: 1000,
+        gid: 1000,
+    };
+    let first_key = super::hash_string(&reuse_hash_material(
+        u64::from(base_hash(0x1234, 0x5678, first_metadata_hash, 1000)),
+        mapping,
+        false,
+    ));
+    let second_key = super::hash_string(&reuse_hash_material(
+        u64::from(base_hash(0x1234, 0x5678, second_metadata_hash, 1000)),
+        mapping,
+        false,
+    ));
+    assert_ne!(first_key, second_key);
+}
+
+#[test]
+fn no_sidecar_reuse_identity_is_unchanged() {
+    let mut bytes = fixture(Endian::Little);
+    bytes[TEST_IMAGE_OFFSET..TEST_IMAGE_OFFSET + 4].copy_from_slice(b"DWAR");
+
+    let (offset, is_dwar, metadata_hash) = selected_image_hash(&bytes);
+    assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
+    assert!(is_dwar);
+    assert_eq!(metadata_hash, 0);
+
+    let mapping = IdMapping {
+        uid: 1000,
+        gid: 1000,
+    };
+    let key = super::hash_string(&reuse_hash_material(
+        u64::from(base_hash(0x1234, 0x5678, metadata_hash, 1000)),
+        mapping,
+        false,
+    ));
+    let control = super::hash_string(&reuse_hash_material(
+        u64::from(base_hash(0x1234, 0x5678, 0, 1000)),
+        mapping,
+        false,
+    ));
+    assert_eq!(key, control);
 }
