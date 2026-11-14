@@ -2813,7 +2813,6 @@ fn runtime_boundary_points_to_squashfs_and_dwarfs_magic() {
                 "VALUE=1"
             );
             let image = get_image(&executable, runtime.size).unwrap();
-            assert_eq!(image.is_squash, magic == b"hsqs");
             assert_eq!(image.is_dwar, magic == b"DWAR");
             assert_eq!(
                 fast_hash_file(&image.file, executable.size, image.offset).unwrap(),
@@ -2859,13 +2858,13 @@ fn image_with_metadata_slot(payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn selected_image(bytes: &[u8]) -> (u64, bool, bool) {
+fn selected_image(bytes: &[u8]) -> (u64, bool) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image");
     std::fs::write(&path, bytes).unwrap();
     let executable = SelfExecutable::open_path(&path).unwrap();
     let image = get_image(&executable, TEST_IMAGE_OFFSET as u64).unwrap();
-    (image.offset, image.is_dwar, image.is_squash)
+    (image.offset, image.is_dwar)
 }
 
 #[test]
@@ -2873,10 +2872,9 @@ fn valid_single_squashfs_is_not_treated_as_metadata() {
     let mut bytes = fixture(Endian::Little);
     write_squashfs_superblock(&mut bytes, TEST_IMAGE_OFFSET, 4100);
 
-    let (offset, is_dwar, is_squash) = selected_image(&bytes);
+    let (offset, is_dwar) = selected_image(&bytes);
     assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
     assert!(!is_dwar);
-    assert!(is_squash);
 }
 
 #[test]
@@ -2888,10 +2886,9 @@ fn trailer_text_with_dwar_is_not_selected_as_a_payload() {
     let trailer_start = TEST_IMAGE_OFFSET + 4100;
     bytes[trailer_start..trailer_start + trailer.len()].copy_from_slice(trailer);
 
-    let (offset, is_dwar, is_squash) = selected_image(&bytes);
+    let (offset, is_dwar) = selected_image(&bytes);
     assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
     assert!(!is_dwar);
-    assert!(is_squash);
 }
 
 #[test]
@@ -2903,10 +2900,9 @@ fn trailer_text_at_the_slot_boundary_is_not_selected_as_a_payload() {
     bytes.resize(trailer_start + trailer.len(), 0);
     bytes[trailer_start..].copy_from_slice(trailer);
 
-    let (offset, is_dwar, is_squash) = selected_image(&bytes);
+    let (offset, is_dwar) = selected_image(&bytes);
     assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
     assert!(!is_dwar);
-    assert!(is_squash);
 }
 
 #[test]
@@ -2914,10 +2910,9 @@ fn trailer_text_at_the_slot_boundary_is_not_selected_as_a_payload() {
 fn metadata_slot_selects_following_dwarfs_payload() {
     let bytes = image_with_metadata_slot(b"DWARFS\x02\x05\x00\x00");
 
-    let (offset, is_dwar, is_squash) = selected_image(&bytes);
+    let (offset, is_dwar) = selected_image(&bytes);
     assert_eq!(offset, (TEST_IMAGE_OFFSET + TEST_METADATA_SLOT_SIZE) as u64);
     assert!(is_dwar);
-    assert!(!is_squash);
 }
 
 #[test]
@@ -2926,20 +2921,18 @@ fn squashfs_payload_after_metadata_slot_keeps_the_metadata_squashfs() {
     write_squashfs_superblock(&mut payload, 0, 96);
     let bytes = image_with_metadata_slot(&payload);
 
-    let (offset, is_dwar, is_squash) = selected_image(&bytes);
+    let (offset, is_dwar) = selected_image(&bytes);
     assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
     assert!(!is_dwar);
-    assert!(is_squash);
 }
 
 #[test]
 fn invalid_payload_keeps_the_metadata_squashfs() {
     let bytes = image_with_metadata_slot(b"not a filesystem");
 
-    let (offset, is_dwar, is_squash) = selected_image(&bytes);
+    let (offset, is_dwar) = selected_image(&bytes);
     assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
     assert!(!is_dwar);
-    assert!(is_squash);
 }
 
 #[test]
@@ -2947,20 +2940,18 @@ fn non_zero_metadata_padding_keeps_the_first_squashfs() {
     let mut bytes = image_with_metadata_slot(b"DWARFS\x02\x05\x00\x00");
     bytes[TEST_IMAGE_OFFSET + TEST_METADATA_BYTES_USED as usize] = 1;
 
-    let (offset, is_dwar, is_squash) = selected_image(&bytes);
+    let (offset, is_dwar) = selected_image(&bytes);
     assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
     assert!(!is_dwar);
-    assert!(is_squash);
 }
 
 #[test]
 fn unsupported_dwarfs_version_keeps_the_metadata_squashfs() {
     let bytes = image_with_metadata_slot(b"DWARFS\x03\x00\x00\x00");
 
-    let (offset, is_dwar, is_squash) = selected_image(&bytes);
+    let (offset, is_dwar) = selected_image(&bytes);
     assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
     assert!(!is_dwar);
-    assert!(is_squash);
 }
 
 #[test]
@@ -2968,8 +2959,7 @@ fn unsupported_dwarfs_version_keeps_the_metadata_squashfs() {
 fn unsupported_dwarfs_payload_keeps_the_metadata_squashfs() {
     let bytes = image_with_metadata_slot(b"DWARFS\x02\x05\x00\x00");
 
-    let (offset, is_dwar, is_squash) = selected_image(&bytes);
+    let (offset, is_dwar) = selected_image(&bytes);
     assert_eq!(offset, TEST_IMAGE_OFFSET as u64);
     assert!(!is_dwar);
-    assert!(is_squash);
 }

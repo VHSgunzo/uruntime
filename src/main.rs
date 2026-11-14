@@ -236,7 +236,6 @@ struct Image {
     file: File,
     path: PathBuf,
     offset: u64,
-    is_squash: bool,
     is_dwar: bool,
 }
 
@@ -546,6 +545,13 @@ fn payload_offset_after_metadata(executable: &SelfExecutable, offset: u64) -> Re
     if payload_offset > executable.size {
         return Ok(None);
     }
+
+    let mut header = [0u8; DWARFS_HEADER_SIZE];
+    let read = executable.file.read_at(&mut header, payload_offset)?;
+    if !is_valid_dwarfs_header(&header[..read]) {
+        return Ok(None);
+    }
+
     let Some(padding_start) = offset.checked_add(bytes_used) else {
         return Ok(None);
     };
@@ -559,11 +565,6 @@ fn payload_offset_after_metadata(executable: &SelfExecutable, offset: u64) -> Re
         return Ok(None);
     }
 
-    let mut header = [0u8; SQUASHFS_SUPERBLOCK_SIZE];
-    let read = executable.file.read_at(&mut header, payload_offset)?;
-    if !is_valid_dwarfs_header(&header[..read]) {
-        return Ok(None);
-    }
     Ok(Some(payload_offset))
 }
 
@@ -584,18 +585,16 @@ fn get_image(executable: &SelfExecutable, offset: u64) -> Result<Image> {
     // A leading SquashFS may be a metadata slot. Only switch to the following
     // image when the slot layout and DwarFS payload header validate and this
     // build includes DwarFS support.
-    if is_squash {
+    if cfg!(feature = "dwarfs") && is_squash {
         if let Some(payload_offset) = payload_offset_after_metadata(executable, offset)? {
-            if cfg!(feature = "dwarfs") {
-                if get_env_var!("URUNTIME_DEBUG_METADATA") == "1" {
-                    eprintln!(
-                        "uruntime: skipping metadata image at {offset}, using payload at {payload_offset}"
-                    );
-                }
-                image_offset = payload_offset;
-                is_dwar = true;
-                is_squash = false;
+            if get_env_var!("URUNTIME_DEBUG_METADATA") == "1" {
+                eprintln!(
+                    "uruntime: skipping metadata image at {offset}, using payload at {payload_offset}"
+                );
             }
+            image_offset = payload_offset;
+            is_dwar = true;
+            is_squash = false;
         }
     }
 
@@ -608,7 +607,6 @@ fn get_image(executable: &SelfExecutable, offset: u64) -> Result<Image> {
         path: executable.location.clone(),
         offset: image_offset,
         is_dwar,
-        is_squash,
     })
 }
 
