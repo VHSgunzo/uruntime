@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use tempfile::{Builder as TempBuilder, NamedTempFile};
 use xxhash_rust::xxh64::xxh64;
 
-pub const DWARFS_VERSION: &str = "0.15.8";
+pub const DWARFS_VERSION: &str = "0.15.10";
 
 pub const SQUASHFS_TOOLS_VERSION: &str = "4.7.5.r2";
 pub const SQUASHFUSE_VERSION: &str = "0.6.5";
@@ -31,10 +31,10 @@ pub const ZIG_PLATFORMS: [&str; 5] = [
 ];
 pub const CHECKSUM_MANIFEST: &str = include_str!("checksums.txt");
 
-// Largest v0.15.8 wrapper: 2,966,430 bytes; largest direct SquashFS helper:
+// Largest v0.15.10 wrapper: 2,966,921 bytes; largest direct SquashFS helper:
 // 1,264,416 bytes. Eight MiB leaves >2.8x margin while bounding downloads/cache reads.
 pub const MAX_DOWNLOAD_SIZE: usize = 8 * 1024 * 1024;
-// Largest extracted v0.15.8 helper: 8,767,152 bytes. Sixteen MiB leaves >1.9x margin.
+// Largest extracted v0.15.10 helper: 8,767,728 bytes. Sixteen MiB leaves >1.9x margin.
 pub const MAX_HELPER_SIZE: usize = 16 * 1024 * 1024;
 const LOCK_TIMEOUT: Duration = Duration::from_secs(120);
 const LOCK_RETRY: Duration = Duration::from_millis(25);

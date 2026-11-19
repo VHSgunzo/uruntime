@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-19
+
+### Changed
+
+- Updated bundled DwarFS from 0.15.8 to 0.15.10, with refreshed source/payload checksums for all six architectures. This includes upstream fixes for extraction thread cleanup, quadratic hardlink metadata processing, sparse-file progress reporting, and excessive memory allocation on narrow terminals.
+
 ## [0.8.3] - 2026-11-14
 
 ### Added
@@ -171,7 +177,8 @@ This is a major runtime-safety and compatibility update. It changes how uruntime
 - Generated SquashFS and DwarFS fixtures exclusively with the project-pinned embedded helpers and verified byte-for-byte reproducibility and real bounded application launches.
 - Validated all nine x86_64 and all nine AArch64 release variants, including QEMU execution for AArch64 artifacts.
 
-[Unreleased]: https://github.com/VHSgunzo/uruntime/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/VHSgunzo/uruntime/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/VHSgunzo/uruntime/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/VHSgunzo/uruntime/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/VHSgunzo/uruntime/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/VHSgunzo/uruntime/compare/v0.8.0...v0.8.1
