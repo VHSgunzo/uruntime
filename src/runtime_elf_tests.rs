@@ -361,9 +361,13 @@ fn exec_pathname_fallback_refuses_a_replaced_inode() {
     let empty_root = tempfile::tempdir().unwrap();
 
     for errno in [libc::ENOSYS, libc::ENOTSUP, libc::EINVAL, libc::EPERM] {
-        let err = exec_self_fd_with(&executable, &[], &[empty_root.path()], |_, _, _| {
-            Err(std::io::Error::from_raw_os_error(errno))
-        })
+        let err = exec_self_fd_with(
+            &executable,
+            "image",
+            &[],
+            &[empty_root.path()],
+            |_, _, _| Err(std::io::Error::from_raw_os_error(errno)),
+        )
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(
@@ -384,9 +388,13 @@ fn exec_pathname_fallback_refuses_a_missing_file() {
     let empty_root = tempfile::tempdir().unwrap();
 
     for errno in [libc::ENOSYS, libc::ENOTSUP, libc::EINVAL, libc::EPERM] {
-        let err = exec_self_fd_with(&executable, &[], &[empty_root.path()], |_, _, _| {
-            Err(std::io::Error::from_raw_os_error(errno))
-        })
+        let err = exec_self_fd_with(
+            &executable,
+            "image",
+            &[],
+            &[empty_root.path()],
+            |_, _, _| Err(std::io::Error::from_raw_os_error(errno)),
+        )
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(
@@ -397,13 +405,37 @@ fn exec_pathname_fallback_refuses_a_missing_file() {
 }
 
 #[test]
+fn execveat_preserves_arg0_and_forwarded_arguments() {
+    let executable = SelfExecutable::open_path(&std::env::current_exe().unwrap()).unwrap();
+    let args = ["", "--runtime-unshare", "argument with spaces", "значение"].map(String::from);
+    for arg0 in ["./symlink", "custom argv0", ""] {
+        let err = exec_self_fd_with(&executable, arg0, &args, &[], |fd, argv, _| {
+            assert_eq!(fd, executable.file.as_raw_fd());
+            for (index, expected) in std::iter::once(arg0)
+                .chain(args.iter().map(String::as_str))
+                .enumerate()
+            {
+                assert_eq!(
+                    unsafe { std::ffi::CStr::from_ptr(*argv.add(index)) }.to_bytes(),
+                    expected.as_bytes()
+                );
+            }
+            assert!(unsafe { (*argv.add(args.len() + 1)).is_null() });
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+        })
+        .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EACCES));
+    }
+}
+
+#[test]
 fn execveat_unexpected_success_is_returned_as_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image");
     std::fs::write(&path, b"original").unwrap();
     let executable = SelfExecutable::open_path(&path).unwrap();
 
-    let err = exec_self_fd_with(&executable, &[], &[], |_, _, _| Ok(())).unwrap_err();
+    let err = exec_self_fd_with(&executable, "image", &[], &[], |_, _, _| Ok(())).unwrap_err();
 
     assert!(err
         .to_string()
@@ -448,6 +480,7 @@ fn repeated_descriptor_fallback_failures_preserve_cloexec_and_fd_count() {
     for _ in 0..32 {
         let error = exec_self_fd_with(
             &executable,
+            "not-an-elf",
             &[],
             &[std::path::Path::new("/proc/self/fd")],
             |_, _, _| Err(std::io::Error::from_raw_os_error(libc::EPERM)),
@@ -474,7 +507,7 @@ fn exec_fallback_worker() {
     let path = std::env::current_exe().unwrap();
     let executable = SelfExecutable::open_path(&path).unwrap();
     let empty_root = tempfile::tempdir().unwrap();
-    let fd_roots: Vec<&std::path::Path> = if mode == "descriptor" {
+    let fd_roots: Vec<&std::path::Path> = if mode == "descriptor" || mode == "native" {
         std::fs::rename(&path, path.with_extension("retained")).unwrap();
         std::fs::write(&path, b"replacement must not execute").unwrap();
         vec![
@@ -500,13 +533,32 @@ fn exec_fallback_worker() {
     }
     let err = exec_self_fd_with(
         &executable,
+        &std::env::args().next().unwrap(),
         &[
             "runtime_elf_tests::exec_fallback_landing".into(),
             "--exact".into(),
             "--nocapture".into(),
         ],
         &fd_roots,
-        |_, _, _| Err(std::io::Error::from_raw_os_error(injected_errno)),
+        |fd, argv, envp| {
+            if mode == "native" {
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_execveat,
+                        fd,
+                        c"".as_ptr(),
+                        argv,
+                        envp,
+                        libc::AT_EMPTY_PATH,
+                    );
+                }
+                panic!(
+                    "native execveat returned: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            Err(std::io::Error::from_raw_os_error(injected_errno))
+        },
     )
     .unwrap_err();
     panic!("{mode:?} fallback failed: {err}");
@@ -519,6 +571,7 @@ fn exec_fallback_landing() {
             std::env::var("URUNTIME_EXEC_FALLBACK_LANDING").unwrap(),
             "1"
         );
+        assert_eq!(std::env::args().next().unwrap(), "./relative-alias");
     }
 }
 
@@ -541,6 +594,7 @@ fn run_exec_fallback_worker(mode: &str, errno: i32) {
 
     let mut command = Command::new(&executable);
     command
+        .arg0("./relative-alias")
         .args([
             "runtime_elf_tests::exec_fallback_worker",
             "--exact",
@@ -572,6 +626,15 @@ fn run_exec_fallback_worker(mode: &str, errno: i32) {
         status.success(),
         "{mode} fallback worker failed for errno {errno}: {status}"
     );
+}
+
+#[test]
+fn execveat_reexecutes_retained_inode_with_original_arg0() {
+    if std::env::var("URUNTIME_FOREIGN_TEST_RUNNER").as_deref() == Ok("qemu-user") {
+        eprintln!("NOT RUN native execveat: requires native descriptor execution");
+        return;
+    }
+    run_exec_fallback_worker("native", 0);
 }
 
 #[test]

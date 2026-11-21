@@ -197,6 +197,10 @@ Fallback from a failed mount reexecutes the retained runtime using:
 3. as a final compatibility fallback, the original pathname after exact `dev`/`ino` verification.
 
 An unrelated replacement at the original pathname is never intentionally executed.
+All self-reexecution paths preserve the original `argv[0]` independently of the
+executable FD or verified fallback pathname. AppImage `ARGV0` and RunImage `ARG0`
+therefore retain the caller's invocation name, including a relative symlink name,
+through no-FUSE extraction fallback and mount retries.
 
 ### 4.4 Selecting the application filesystem
 

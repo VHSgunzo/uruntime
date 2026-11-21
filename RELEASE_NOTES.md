@@ -1,8 +1,7 @@
-## uruntime v0.8.4
+## uruntime v0.8.5
 
-- Update bundled DwarFS to [0.15.10](https://github.com/mhx/dwarfs/releases/tag/v0.15.10) across all six architectures, including full and lite runtimes.
-- Include upstream fixes for extraction thread cleanup, slow hardlink metadata processing, sparse-file progress reporting, and excessive memory allocation on narrow terminals.
+- Fix invocation-name preservation when FUSE is unavailable or mounting requires an internal retry ([#30](https://github.com/VHSgunzo/uruntime/issues/30)). AppImage `ARGV0` and RunImage `ARG0` keep the original launch name, including symlinks, instead of changing to the resolved image path.
 
-No runtime configuration or image layout changes are required.
+No runtime configuration or image layout changes are required. Rebuild existing images with the updated runtime to include the fix.
 
-[Full changelog](https://github.com/VHSgunzo/uruntime/blob/v0.8.4/CHANGELOG.md).
+[Full changelog](https://github.com/VHSgunzo/uruntime/blob/v0.8.5/CHANGELOG.md).

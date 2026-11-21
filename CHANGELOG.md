@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-11-21
+
+### Fixed
+
+- Preserved the original invocation name across internal runtime reexecution for no-FUSE extraction fallback and mount retries (#30). AppImage `ARGV0` and RunImage `ARG0` now retain relative paths, symlink names, and caller-supplied `argv[0]` instead of changing to the resolved image path. Retained-inode execution and compatibility-fallback identity checks are unchanged.
+
 ## [0.8.4] - 2026-11-19
 
 ### Changed
@@ -177,7 +183,8 @@ This is a major runtime-safety and compatibility update. It changes how uruntime
 - Generated SquashFS and DwarFS fixtures exclusively with the project-pinned embedded helpers and verified byte-for-byte reproducibility and real bounded application launches.
 - Validated all nine x86_64 and all nine AArch64 release variants, including QEMU execution for AArch64 artifacts.
 
-[Unreleased]: https://github.com/VHSgunzo/uruntime/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/VHSgunzo/uruntime/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/VHSgunzo/uruntime/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/VHSgunzo/uruntime/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/VHSgunzo/uruntime/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/VHSgunzo/uruntime/compare/v0.8.1...v0.8.2

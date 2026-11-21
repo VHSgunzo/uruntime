@@ -3218,9 +3218,10 @@ fn executable_path(arg0: &str) -> Result<PathBuf> {
         })
 }
 
-fn exec_self_fd(executable: &SelfExecutable, args: &[String]) -> Result<()> {
+fn exec_self_fd(executable: &SelfExecutable, arg0: &str, args: &[String]) -> Result<()> {
     exec_self_fd_with(
         executable,
+        arg0,
         args,
         &[Path::new("/proc/self/fd"), Path::new("/dev/fd")],
         |fd, argv, envp| {
@@ -3245,6 +3246,7 @@ fn exec_self_fd(executable: &SelfExecutable, args: &[String]) -> Result<()> {
 
 fn exec_self_fd_with<F>(
     executable: &SelfExecutable,
+    arg0: &str,
     args: &[String],
     fd_roots: &[&Path],
     try_execveat: F,
@@ -3259,10 +3261,7 @@ where
     let mut argv = Vec::new();
     argv.try_reserve_exact(argv_capacity)
         .map_err(|error| Error::other(format!("failed to reserve argument storage: {error}")))?;
-    argv.push(
-        CString::new(executable.location.as_os_str().as_bytes())
-            .map_err(|error| Error::new(InvalidData, error))?,
-    );
+    argv.push(CString::new(arg0).map_err(|error| Error::new(InvalidData, error))?);
     for arg in args {
         argv.push(CString::new(arg.as_bytes()).map_err(|error| Error::new(InvalidData, error))?);
     }
@@ -5283,7 +5282,7 @@ fn main() {
                         if !target_dir_is_empty {
                             env::set_var(format!("{ENV_NAME}_TARGET_DIR"), &target_dir);
                         }
-                        let err = match exec_self_fd(executable, &exec_args) {
+                        let err = match exec_self_fd(executable, &arg0, &exec_args) {
                             Err(err) => err,
                             Ok(()) => Error::other(
                                 "exec unexpectedly returned success without replacing the process",
@@ -5372,7 +5371,7 @@ fn main() {
             if !target_dir_is_empty {
                 env::set_var(format!("{ENV_NAME}_TARGET_DIR"), &target_dir);
             }
-            let err = match exec_self_fd(executable, &exec_args) {
+            let err = match exec_self_fd(executable, &arg0, &exec_args) {
                 Err(err) => err,
                 Ok(()) => {
                     Error::other("exec unexpectedly returned success without replacing the process")
