@@ -412,7 +412,10 @@ fn verify_no_fuse_automatic_extraction_fallback(
     image: &Path,
     filesystem: &str,
 ) -> Result<(), DynError> {
-    for launch in ["first", "second"] {
+    for (launch, invocation, expected_argv0) in [
+        ("first", "./image.AppImage", "./image.AppImage"),
+        ("second", "/image-link", "/image-link"),
+    ] {
         let result = bounded_command(
             Command::new(bwrap)
                 .args([
@@ -426,9 +429,12 @@ fn verify_no_fuse_automatic_extraction_fallback(
                 ])
                 .arg(image)
                 .arg("/image.AppImage")
+                .args(["--symlink", "/image.AppImage", "/image-link"])
                 .args(["--clearenv", "--setenv", "PATH", "/usr/bin:/bin"])
                 .args(["--setenv", "REUSE_CHECK_DELAY", "1s"])
-                .args(["/image.AppImage", "fixture-image-test"]),
+                .args(["--chdir", "/"])
+                .arg(invocation)
+                .arg("fixture-image-test"),
             &format!("{launch} {filesystem} no-FUSE automatic extraction fallback"),
         )?;
         if !result.status.success() {
@@ -447,7 +453,12 @@ fn verify_no_fuse_automatic_extraction_fallback(
             )
             .into());
         }
-        for expected in ["fixture=uruntime-apprun-v1", "argv.1=fixture-image-test"] {
+        let expected_argv0 = format!("env.ARGV0={expected_argv0}");
+        for expected in [
+            "fixture=uruntime-apprun-v1",
+            "argv.1=fixture-image-test",
+            expected_argv0.as_str(),
+        ] {
             if !launched.lines().any(|line| line == expected) {
                 return Err(
                     format!("{launch} {filesystem} no-FUSE fallback omitted `{expected}`").into(),

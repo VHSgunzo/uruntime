@@ -196,7 +196,7 @@ Fallback from a failed mount reexecutes the retained runtime using:
 2. for compatibility errors `ENOSYS`, `ENOTSUP`, compatible `EINVAL`, or `EPERM`, a verified `/proc/self/fd/N` or `/dev/fd/N` path;
 3. as a final compatibility fallback, the original pathname after exact `dev`/`ino` verification.
 
-An unrelated replacement at the original pathname is never intentionally executed.
+An unrelated replacement at the original pathname is never intentionally executed. The reexecution keeps the caller's original `argv[0]`, so `ARGV0` and `ARG0` continue to describe the invocation path rather than the canonical executable location.
 
 ### 4.4 Selecting the application filesystem
 
@@ -575,13 +575,13 @@ For normal or extract-and-run execution:
 ### AppImage
 
 - require `<target>/AppRun`;
-- set `ARGV0`, `APPDIR`, `APPIMAGE`, and `APPOFFSET`.
+- set `ARGV0` to the original invocation `argv[0]`, plus `APPDIR`, `APPIMAGE`, and `APPOFFSET`.
 
 ### RunImage
 
 - require `<target>/static/bash`;
 - prepend `<target>/Run.sh` to application arguments;
-- set `ARG0`, `RUNDIR`, `RUNIMAGE`, and `RUNOFFSET`.
+- set `ARG0` to the original invocation `argv[0]`, plus `RUNDIR`, `RUNIMAGE`, and `RUNOFFSET`.
 
 Both formats:
 

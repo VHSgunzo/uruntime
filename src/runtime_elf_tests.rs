@@ -45,6 +45,8 @@ use std::time::{Duration, Instant};
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 static EXECUTABLE_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
+const FALLBACK_ARGV0: &str = "fallback-original-argv0";
+
 fn wait_child_with_timeout(
     child: &mut std::process::Child,
     timeout: Duration,
@@ -361,9 +363,13 @@ fn exec_pathname_fallback_refuses_a_replaced_inode() {
     let empty_root = tempfile::tempdir().unwrap();
 
     for errno in [libc::ENOSYS, libc::ENOTSUP, libc::EINVAL, libc::EPERM] {
-        let err = exec_self_fd_with(&executable, &[], &[empty_root.path()], |_, _, _| {
-            Err(std::io::Error::from_raw_os_error(errno))
-        })
+        let err = exec_self_fd_with(
+            &executable,
+            FALLBACK_ARGV0,
+            &[],
+            &[empty_root.path()],
+            |_, _, _| Err(std::io::Error::from_raw_os_error(errno)),
+        )
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(
@@ -384,9 +390,13 @@ fn exec_pathname_fallback_refuses_a_missing_file() {
     let empty_root = tempfile::tempdir().unwrap();
 
     for errno in [libc::ENOSYS, libc::ENOTSUP, libc::EINVAL, libc::EPERM] {
-        let err = exec_self_fd_with(&executable, &[], &[empty_root.path()], |_, _, _| {
-            Err(std::io::Error::from_raw_os_error(errno))
-        })
+        let err = exec_self_fd_with(
+            &executable,
+            FALLBACK_ARGV0,
+            &[],
+            &[empty_root.path()],
+            |_, _, _| Err(std::io::Error::from_raw_os_error(errno)),
+        )
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(
@@ -403,7 +413,8 @@ fn execveat_unexpected_success_is_returned_as_an_error() {
     std::fs::write(&path, b"original").unwrap();
     let executable = SelfExecutable::open_path(&path).unwrap();
 
-    let err = exec_self_fd_with(&executable, &[], &[], |_, _, _| Ok(())).unwrap_err();
+    let err =
+        exec_self_fd_with(&executable, FALLBACK_ARGV0, &[], &[], |_, _, _| Ok(())).unwrap_err();
 
     assert!(err
         .to_string()
@@ -448,6 +459,7 @@ fn repeated_descriptor_fallback_failures_preserve_cloexec_and_fd_count() {
     for _ in 0..32 {
         let error = exec_self_fd_with(
             &executable,
+            FALLBACK_ARGV0,
             &[],
             &[std::path::Path::new("/proc/self/fd")],
             |_, _, _| Err(std::io::Error::from_raw_os_error(libc::EPERM)),
@@ -500,6 +512,7 @@ fn exec_fallback_worker() {
     }
     let err = exec_self_fd_with(
         &executable,
+        FALLBACK_ARGV0,
         &[
             "runtime_elf_tests::exec_fallback_landing".into(),
             "--exact".into(),
@@ -518,6 +531,11 @@ fn exec_fallback_landing() {
         assert_eq!(
             std::env::var("URUNTIME_EXEC_FALLBACK_LANDING").unwrap(),
             "1"
+        );
+        assert_eq!(
+            std::env::args().next().as_deref(),
+            Some(FALLBACK_ARGV0),
+            "retained-inode reexecution replaced the original argv[0]"
         );
     }
 }
