@@ -11,6 +11,7 @@ A single ELF contains the launcher and static filesystem tools. Runtime settings
 - Fully static binaries for six Linux architectures.
 - FUSE mounting, forced extraction, and automatic extraction fallback.
 - Safe reuse of shared mounts and extracted directories across overlapping launches.
+- A suspend guard that freezes the application ahead of its FUSE mount, so a busy application cannot block a system suspend.
 - User and mount namespaces with optional UID/GID mapping and capability dropping.
 - Portable home, data, config, and cache directories beside the image.
 - Embedded filesystem tools that can be called through runtime options or executable names.
@@ -24,7 +25,7 @@ When an image starts, `uruntime`:
 1. finds and validates the appended SquashFS or DwarFS image;
 2. mounts it through FUSE or extracts it according to the configured policy;
 3. prepares namespaces, portable directories, and the runtime environment;
-4. starts `AppRun` for AppImage or `Run.sh` for RunImage;
+4. starts `AppRun` for AppImage or `Run.sh` for RunImage, for a FUSE mount in a systemd scope of its own so that a suspend can freeze the application before its filesystem helper;
 5. keeps shared targets alive while participating application trees are still running, then cleans them up according to the reuse policy.
 
 Filesystem helpers are stored inside the runtime in Zstd-compressed form and normally run through `memfd`. Cleanup fails safe: if uruntime cannot prove that a shared target is no longer in use, it retains the target instead of deleting active data or unmounting a live filesystem.

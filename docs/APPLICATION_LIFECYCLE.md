@@ -58,7 +58,8 @@ flowchart TD
     Y -- no --> AA[Prepare AppRun or RunImage command,<br/>portable environment and capability policy]
     AA --> AB{Extract-and-run target?}
     AB -- yes --> AB1[Create application supervisor<br/>and enable child subreaper when possible]
-    AB -- no, FUSE --> AC[Spawn and wait for main application directly]
+    AB -- no, FUSE --> AB2[Start suspend guard when cgroup v2,<br/>systemd and logind allow it]
+    AB2 --> AC[Spawn and wait for main application directly]
     AB1 --> AC
     AC --> AD[Return main application status<br/>to original caller]
     AD --> AE{Extraction supervisor active?}
@@ -249,6 +250,10 @@ Root mapping takes precedence over separate UID/GID values. Any explicit mapping
 | `3` | no initial request | drop capabilities only when isolation/direct privileged mounting is entered as an automatic fallback |
 
 Capabilities are dropped only in the application child's pre-exec hook and only after successful isolation or the privileged no-proc direct-mount fallback. Filesystem helpers keep the capabilities needed to mount.
+
+### 5.5 Suspend guard switch
+
+The suspend guard has no embedded policy string. It is on for every FUSE-backed application launch. `NO_SUSPEND_GUARD=1`, from the caller's environment or from the embedded or adjacent environment file, turns it off. Section 12.3 lists the conditions under which it stays off by itself.
 
 ## 6. Target naming and coordination files
 
@@ -566,7 +571,8 @@ Both formats:
 - consume the runtime `--` separator while preserving following application arguments;
 - optionally drop capabilities in the application pre-exec hook;
 - pass the shared target lease to the application child by clearing `FD_CLOEXEC` only in that child's pre-exec hook;
-- without procfs, also pass a lifetime-pipe writer to ordinary descendants.
+- without procfs, also pass a lifetime-pipe writer to ordinary descendants;
+- for a FUSE-backed launch, start the suspend guard and hold the application child at its gate in the last pre-exec hook (section 12.3).
 
 ## 12. Extraction supervisor and application lifetime
 
@@ -600,8 +606,10 @@ sequenceDiagram
         S->>L: release this launch's shared lease
         S->>K: continue cleanup when this launch owns it
     else FUSE-backed application
+        C->>C: start the suspend guard when systemd and logind allow it
         C->>A: spawn application directly without a supervisor
         A-->>C: main application exits
+        C->>C: stop the suspend guard
         C->>K: fork detached mount-cleanup actor when this launch owns cleanup
         C->>L: release shared lease in cleanup actor
         K->>K: rely on MNT_EXPIRE or unmount/EBUSY kernel guards
@@ -640,6 +648,100 @@ For extract-and-run, the original caller reads two fixed-size values from the su
 The extraction supervisor reports the main application's status before waiting for adopted background descendants and before delayed cleanup. It then detaches its standard streams so shell pipelines and output-capture APIs are not held open by lifecycle work. Normally each stream is redirected to `/dev/null`; in a minimal root without that device, the supervisor creates a private temporary sink next to the target, unlinks it immediately, and redirects descriptors `0`, `1`, and `2` to the still-open anonymous inode. This keeps the standard descriptor numbers occupied without leaving a pathname or allowing later lock/control files to reuse them. A FUSE-backed launch has no application supervisor: the original runtime waits for the main application directly and then hands cleanup to the normal detached cleanup actor.
 
 If the main child exits due to a signal and no numeric exit code is available, the current implementation retains the initialized exit code (`0`). A spawn failure reports PID `0`, prints the execution error, uses exit code `1`, and enters immediate inline cleanup.
+
+### 12.3 Suspend guard
+
+A suspend freezes every user process at once: systemd freezes the `user.slice` cgroup, then the kernel freezer stops what is left. Neither has an order. If the FUSE helper is frozen while the application waits for a read from the mount, the application sits in an uninterruptible wait and cannot be frozen. The suspend is aborted, and with the lid closed logind retries at once.
+
+An application freezes without trouble while its helper still runs. The guard creates that order for FUSE-backed launches: the application is frozen first, under a logind delay lock, and only then may the suspend freeze the helper.
+
+The guard is best effort. It needs a systemd user manager and logind. Where either is missing, or any step fails, the application starts exactly as it did without the guard.
+
+#### When the guard is active
+
+| Condition | Guard |
+|---|---|
+| extract-and-run or mount-only | off: there is no FUSE-backed application |
+| `NO_SUSPEND_GUARD=1` | off |
+| `/proc/self/cgroup` does not start with `0::/` | off: cgroup v2 is required |
+| the runtime is not in the initial PID namespace | off: a PID would name another process to systemd |
+| no session bus address (`DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`) | off |
+| logind does not answer on the system bus (`DBUS_SYSTEM_BUS_ADDRESS`, else `/run/dbus/system_bus_socket`) | off, and no scope is created |
+| the bus refuses the login, as it does under a UID mapping | off |
+| the user manager refuses `StartTransientUnit`, or the move takes too long | off |
+
+#### Launch gate
+
+```mermaid
+sequenceDiagram
+    participant R as Runtime main thread
+    participant G as Guard thread
+    participant A as Application child
+    participant S as systemd user manager
+    participant L as logind
+
+    R->>G: start with a PID pipe, a gate pipe and a stop pipe
+    G->>L: connect and read InhibitDelayMaxUSec
+    G->>S: connect
+    R->>A: fork through the application spawn
+    A->>G: write own PID, then wait at the gate for at most 2 s
+    G->>S: StartTransientUnit for a scope in app.slice that holds the PID
+    G->>G: wait until the cgroup of the PID is the scope
+    G->>A: close the gate
+    A->>A: exec AppRun or Run.sh
+    G->>S: StartTransientUnit for a second scope that holds the FUSE helper
+    G->>L: AddMatch for PrepareForSleep, then Inhibit sleep in delay mode
+```
+
+- The gate hook is the last pre-exec hook and uses only `close`, `getpid`, `write`, and `poll`.
+- The application is moved by PID, never through the runtime's own cgroup: a desktop launcher may move the runtime at any moment.
+- The gate opens when the guard thread drops its end, which every path of the thread does. The bus logins get one second and the move into the scope 0.9 seconds, and the child stops waiting after 2 seconds whatever the thread does. A launch never hangs on a bus that does not answer.
+- On a desktop the gate costs the application about 15 to 20 ms of start time. Nearly all of it is systemd creating the scope and moving the process.
+- The runtime stays in the cgroup it was started in. Only the application and what it forks live in the application scope.
+- The FUSE helper of this launch is moved into a scope of its own, `uruntime-fuse-<file stem>-<PID>.scope`, once the gate is open. Left where it was started, it can sit inside the application scope of another guarded application that launched this one, and that application's guard would freeze it under clients that still run. No guard freezes a scope of that name. A launch that reuses a mount has no helper to move.
+- The scope is named `app-<launcher>-<id>-<PID>.scope` when the runtime's own unit is a launch scope of that form, so the application id that portals read from the name is kept. Otherwise it is `app-uruntime-<file stem>-<PID>.scope`, escaped as systemd escapes unit names. A runtime started by another guarded application sits in a scope of that second form and does not carry its name over.
+- The scope is created with `CollectMode=inactive-or-failed`, so a failed scope does not keep its name taken.
+
+#### Suspend and resume
+
+| Event | Guard action |
+|---|---|
+| `PrepareForSleep(true)` | determine the freeze set; wait while a process in one of its units holds a delay lock of its own, at most until one second before `InhibitDelayMaxUSec`; determine the set again; `FreezeUnit` on each unit; then close the delay lock |
+| `PrepareForSleep(true)` while already frozen | close the delay lock, if one is held |
+| `PrepareForSleep(false)` | take a new delay lock, then `ThawUnit` on every unit that was frozen, in reverse order |
+| `PrepareForSleep(false)` and `Inhibit` fails with `OperationInProgress` | stay frozen: logind is already retrying a failed suspend, and the resume after it thaws |
+| the main application exits | `ThawUnit` if frozen, then close the lock and both bus connections; the cleanup actor takes the guard over (see below) |
+| the system bus closes | `ThawUnit` if frozen, then close the lock and both bus connections |
+
+The freeze set is the scope made for the application plus every other scope that holds a live descendant of the application's main process or a process whose executable lies in the mount. An application does not have to stay where it was put: Chromium, and with it every Electron application, moves its main process into a scope of its own at startup, and the processes it forks later are born there. The executable test also finds a process whose parent has exited.
+
+The set never contains the cgroup the runtime itself is in, a unit that is not a scope, a `uruntime-fuse-` scope, or any scope in which a process has `/dev/fuse` open. The last rule covers FUSE servers that are not uruntime's own, such as the helper of an image on another runtime that the application has launched. Such a scope is left to the general freeze: an unguarded application is the old risk, a server frozen under running clients is a certain failure.
+
+Waiting for the application's own delay lock lets an application that handles the suspend itself, as Electron applications do, finish first. This also orders nested guards: an outer guard sees the inner guard's lock inside its freeze set and waits, so the innermost application freezes first.
+
+The main process of an application is not always the application. A launcher may start the real program and exit, as the one of VS Code does, and the runtime then returns its status and the first guard ends. When this launch owns the mount, the detached cleanup actor stays alive for as long as anything runs from the mount, so it starts a second guard for the same scope: new bus connections, a new delay lock, the same event table. That guard has no process tree to walk and finds the application by the executable test alone. It ends just before the actor exits. A launch that reuses a mount starts no actor; what it leaves behind is covered by the guard of the launch that owns the mount.
+
+`FreezeUnit` is used instead of a write to `cgroup.freeze`, because systemd resets a directly written freeze when it thaws the parent slice. A freeze or thaw that does not answer within 900 ms counts as done: the lock is still released in time, and a freeze that completes late is undone on resume.
+
+#### Invariants
+
+1. The guard runs in the runtime process, whose executable is the image file on disk. It never depends on the mount, and it never freezes the unit it is in.
+2. No guard freezes a FUSE server. uruntime's own helpers live in `uruntime-fuse-` scopes, and a scope in which any process has `/dev/fuse` open is left alone.
+3. The guard never starts a service. Every call carries `NO_AUTO_START`.
+4. `PrepareForSleep` is obeyed only when its sender is the current owner of `org.freedesktop.login1`. Any client of the system bus can send that signal straight to another client.
+5. The delay lock and both bus sockets are close-on-exec and owned by the guard thread. The thread is joined before the cleanup actor is forked, so no long-lived process inherits the lock.
+6. A guard that ends normally never leaves the application frozen.
+7. The guard prints nothing.
+
+#### Limits
+
+- After the main application process has exited, the guard lives on only in the cleanup actor of the launch that owns the mount. A mount that is kept forever (`NO_UNMOUNT=1`, or `REUSE_CHECK_DELAY=inf`) has no waiting actor, so processes that outlive their main process are then unguarded.
+- A process that neither descends from the application's main process, nor runs an executable from the mount, nor sits in a scope of the freeze set is not found. A script interpreter from the host that was double-forked into a scope of its own is the example.
+- An application scope that also holds a FUSE server is not frozen ahead of the suspend at all.
+- If the runtime is killed while the scope is frozen, the application stays frozen until `systemctl --user thaw <scope>`.
+- The application leaves the cgroup of the unit that launched it. Resource limits of that unit, for example `MemoryMax=` of a user service, no longer apply to it. `NO_SUSPEND_GUARD=1` restores the old layout.
+- A runtime launched from a unit of another form, such as the `app-<id>@<random>.service` units of KDE, gets the generic scope name.
+- Systems without a systemd user manager or without logind are not guarded.
 
 ## 13. Signal handling
 
@@ -863,6 +965,8 @@ For private records, a dead owner PID causes stale-record removal under the reco
 | trusted PID record cannot be published | warn and continue current mount; future reuse may be unavailable |
 | `AppRun` or RunImage `static/bash` absent | remove runtime-owned temporary state where possible and exit |
 | application spawn fails | exit `1` after immediate inline cleanup |
+| suspend guard cannot reach systemd or logind, or its setup misses its deadline | launch continues unguarded |
+| logind refuses a new delay lock because a suspend is under way | the application scope stays frozen until the next resume |
 | extraction supervisor channel/fork fails | launch continues; a successfully launched extracted target is retained |
 | child-subreaper unsupported | launch continues; extraction is retained, while FUSE expiry/unmount remains available |
 | shared lease still held | cleanup waits and retries |
@@ -934,8 +1038,11 @@ else:
         enable child subreaper when available
     else if FUSE-backed:
         do not create an application supervisor
+        start the suspend guard when cgroup v2, systemd and logind allow it
     spawn application with shared lease and optional no-proc lifetime pipe
+    a guarded child waits at the gate until it is in a scope of its own
     forward signals
+    stop the suspend guard when the main application has exited
     for supervised extraction, report main PID and exit status to original caller
     wait adopted descendants only for supervised extraction
 
@@ -972,6 +1079,8 @@ The main implementation areas in [`src/main.rs`](../src/main.rs) are:
 | signal handling | `signals_handler` |
 | self-reexecution | `exec_self_fd`, `exec_self_fd_with` |
 
+The suspend guard lives in [`src/suspend_guard.rs`](../src/suspend_guard.rs) (`start`, `Gate::hold`, `Guard`). Its bus client is [`src/dbus.rs`](../src/dbus.rs) (`Message`, `Connection`).
+
 Regression coverage is concentrated in [`src/runtime_elf_tests.rs`](../src/runtime_elf_tests.rs), with executable SquashFS/DwarFS fixtures documented under [`tests/`](../tests/).
 
 ## 23. Verification coverage
@@ -991,7 +1100,9 @@ The Rust unit/regression suite runs across the release-derived feature matrix. R
 - procfs-free direct-reuse and private-random-target policy;
 - `MNT_EXPIRE` renewed-access, unsupported, busy, and hard-failure outcomes;
 - failed-spawn cleanup selection and exit-status preservation;
-- trusted record, namespace identity, stale-record, symlink, and lock behavior.
+- trusted record, namespace identity, stale-record, symlink, and lock behavior;
+- D-Bus messages produced by GLib and parsed here in both byte orders, plus reply matching, queueing, and timeouts of the connection;
+- suspend-guard scope naming, cgroup matching, inhibitor parsing, descriptor passing, and the launch gate.
 
 ### 23.2 Canonical end-to-end lifecycle harness
 
@@ -1015,6 +1126,8 @@ Native `cargo xtask check` runs all non-FUSE scenarios unconditionally. FUSE cap
 - `--fuse=auto` emits `NOT RUN` for only the FUSE lane;
 - `--fuse=skip` records an explicit operator-requested omission.
 
+The harness does not exercise the suspend guard: every lane sets `NO_SUSPEND_GUARD=1`, so none depends on the host's logind.
+
 Foreign QEMU checks report the complete native lifecycle harness as `NOT RUN`; QEMU user mode is not treated as proof of namespace or FUSE behavior.
 
 ### 23.3 Fixture and CI/release contracts
@@ -1032,10 +1145,11 @@ See [TESTING.md](TESTING.md) and [`tests/README.md`](../tests/README.md) for com
 
 ## 24. Maintenance rule
 
-Any change to launch mode selection, target naming, mount reuse, namespace transitions, supervisor behavior, exit-status propagation, or cleanup must update this document in the same change. At minimum, review:
+Any change to launch mode selection, target naming, mount reuse, namespace transitions, supervisor behavior, the suspend guard, exit-status propagation, or cleanup must update this document in the same change. At minimum, review:
 
 1. the overview flowchart;
 2. the reuse and namespace diagram;
 3. the supervisor sequence;
-4. the cleanup state machine and outcome tables;
-5. the failure matrix and source map.
+4. the suspend-guard gate sequence and event table;
+5. the cleanup state machine and outcome tables;
+6. the failure matrix and source map.

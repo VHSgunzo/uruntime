@@ -6,7 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Suspend guard for FUSE-backed launches. A suspend freezes all user processes at once, and an application that waits for a read from its mount cannot be frozen once the FUSE helper is frozen, so the suspend failed and logind retried for as long as the lid stayed closed. On systems with cgroup v2, a systemd user manager, and logind, the runtime now moves the application into a transient scope of its own in `app.slice`, holds a logind delay lock, and freezes that scope before the suspend goes on. Scopes that the application has moved its own processes to, as Chromium and Electron do, are frozen with it. It thaws them on resume. When the main process exits and others run on, as with the launcher of VS Code, the detached cleanup actor takes the guard over. The FUSE helper gets a `uruntime-fuse-` scope of its own, no guard freezes a scope that holds a FUSE server, and the runtime stays in its original cgroup. Everywhere else the launch is unchanged, and no launch waits for the guard longer than two seconds. Where the guard is active it adds about 15 to 20 ms to application start, nearly all of it systemd creating the scope, and the application no longer runs in the cgroup of the unit that launched it.
+- `NO_SUSPEND_GUARD=1` turns the suspend guard off. It can be embedded with `--appimage-addenvs`.
+- A minimal hand-written D-Bus client (`src/dbus.rs`) without new dependencies.
+
 ### Changed
+
+- Lifecycle-harness launches set `NO_SUSPEND_GUARD=1`, so they do not depend on the host's logind.
 
 - Restored per-architecture QEMU smoke execution for all finished foreign runtime artifacts in CI. The full AArch64 Rust quality gate remains commented while its QEMU test-suite cost is investigated.
 

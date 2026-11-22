@@ -1,6 +1,6 @@
 # Configuring uruntime
 
-This document describes embedded launch policies, environment variables, namespace controls, and DwarFS settings. See [USAGE.md](USAGE.md) for command-line options and [APPLICATION_LIFECYCLE.md](APPLICATION_LIFECYCLE.md) for the complete state machines and safety invariants.
+This document describes embedded launch policies, environment variables, namespace controls, the suspend guard, and DwarFS settings. See [USAGE.md](USAGE.md) for command-line options and [APPLICATION_LIFECYCLE.md](APPLICATION_LIFECYCLE.md) for the complete state machines and safety invariants.
 
 ## Embedded launch policy
 
@@ -107,8 +107,28 @@ In the tables below, `<ENV>` means `APPIMAGE` or `RUNIMAGE`.
 | `ENABLE_FUSE_DEBUG=1` | Enable debug output from the selected FUSE helper. |
 | `TARGET_<ENV>=/path` | Perform a maintenance operation on another image instead of the runtime itself. |
 | `NO_MEMFDEXEC=1` | Run an extracted helper through a temporary executable file instead of `memfd`. |
+| `NO_SUSPEND_GUARD=1` | Do not move the application into a scope of its own and do not freeze it ahead of a suspend. |
 
 AppImage uses `APPIMAGE_EXTRACT_AND_RUN`, `APPIMAGE_TARGET_DIR`, and `TARGET_APPIMAGE`. RunImage uses `RUNIMAGE_EXTRACT_AND_RUN`, `RUNIMAGE_TARGET_DIR`, and `TARGET_RUNIMAGE`.
+
+### Suspend guard
+
+A suspend freezes all user processes at once. An application that is waiting for a read from its FUSE mount cannot be frozen once the FUSE helper is frozen, so the suspend fails and logind retries. For a FUSE-backed launch on a system with a systemd user manager and logind, the runtime therefore:
+
+1. moves the application into a transient scope of its own in `app.slice`, and the FUSE helper into another one, while the runtime stays where it is;
+2. holds a logind delay lock on sleep;
+3. freezes the application's scope when logind announces a suspend, together with any other scope the application has moved its processes to, then releases the lock;
+4. thaws them on resume.
+
+Everywhere else nothing changes: without cgroup v2, a session bus, a systemd user manager, or logind the application is launched as before. The guard never delays a launch by more than two seconds and never starts a service. Where it is active it adds about 15 to 20 ms to application start, which is the time systemd needs to create the scope.
+
+`NO_SUSPEND_GUARD=1` turns the guard off for one run. To ship an image with the guard off, put the variable into its embedded environment:
+
+```sh
+./My.AppImage --appimage-addenvs 'NO_SUSPEND_GUARD=1'
+```
+
+Turn it off when the application must stay in the cgroup of the unit that starts it, for example a systemd user service that relies on `MemoryMax=` or on `KillMode=control-group`. The bus addresses come from `DBUS_SESSION_BUS_ADDRESS` (else `$XDG_RUNTIME_DIR/bus`) and `DBUS_SYSTEM_BUS_ADDRESS` (else `/run/dbus/system_bus_socket`). See [APPLICATION_LIFECYCLE.md](APPLICATION_LIFECYCLE.md), section 12.3, for the full state machine and its limits.
 
 ### Namespaces and UID/GID mapping
 

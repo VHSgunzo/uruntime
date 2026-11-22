@@ -66,6 +66,8 @@ The native harness builds real appended SquashFS and DwarFS AppImages from the c
 - fail-safe target retention when neither procfs nor subreaper visibility exists;
 - overlapping current-namespace FUSE reuse when FUSE is available.
 
+The harness does not exercise the suspend guard. Every launch sets `NO_SUSPEND_GUARD=1`, so no lane depends on the host's logind.
+
 Run it directly and require FUSE:
 
 ```sh

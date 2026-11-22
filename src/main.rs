@@ -56,7 +56,9 @@ use signal_hook::{
 use which::which_all;
 use xxhash_rust::xxh3::xxh3_64;
 
+mod dbus;
 mod elf_layout;
+mod suspend_guard;
 
 const _LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const CAP_SYS_ADMIN: u32 = 21;
@@ -4327,7 +4329,8 @@ fn print_usage(
       FUSERMOUNT_PROG=/path          Specifies a custom path for fusermount
       ENABLE_FUSE_DEBUG=1            Enables debug mode for the mounted filesystem
       TARGET_{ENV_NAME}=/path          Operate on a target {SELF_NAME} rather than this file itself
-      NO_MEMFDEXEC=1                 Do not use memfd-exec (use a temporary file instead)");
+      NO_MEMFDEXEC=1                 Do not use memfd-exec (use a temporary file instead)
+      NO_SUSPEND_GUARD=1             Do not freeze the application ahead of its FUSE mount on suspend");
     #[cfg(feature = "dwarfs")]
     {
         println!("      DWARFS_WORKERS=2               Number of worker threads for DwarFS (default: equal CPU threads)
@@ -5247,6 +5250,7 @@ fn main() {
     let mut application_supervisor = false;
     let mut child_subreaper_enabled = false;
     let mut application_tree_observable = true;
+    let mut guarded_scope = None;
     let mut supervisor_status_writer: Option<OwnedFd> = None;
     if !is_mount_only {
         cfg_if! {
@@ -5390,6 +5394,21 @@ fn main() {
                 run_command.pre_exec(move || drop_capabilities(last_cap));
             }
         }
+        let suspend_guard = if is_extract_run {
+            None
+        } else {
+            // The mount helper is the FUSE driver, unless the mount was reused.
+            let driver = u32::try_from(child_pid.as_raw())
+                .ok()
+                .filter(|pid| *pid != 0 && !is_tmpdir_exists);
+            suspend_guard::start(self_exe_name, &tmp_dir, driver)
+        };
+        if let Some(gate) = suspend_guard.as_ref().and_then(|guard| guard.gate()) {
+            // Last hook: one that fails before it must not leave a PID behind.
+            unsafe {
+                run_command.pre_exec(move || gate.hold());
+            }
+        }
 
         remove_runtime_separator(&mut exec_args);
         let (state, spawn_result, lifetime_reader) =
@@ -5421,6 +5440,8 @@ fn main() {
                 exit_code = 1
             }
         }
+        // Before any later fork, which would inherit the suspend delay lock.
+        guarded_scope = suspend_guard.and_then(|guard| guard.stop());
         if let Some(writer) = supervisor_status_writer.take() {
             if let Err(err) = write_supervisor_value(writer.as_raw_fd(), exit_code) {
                 eprintln!("Warning: failed to report supervised application status: {err}");
@@ -5463,6 +5484,10 @@ fn main() {
             }
             try_setsid();
         }
+        // The app's main process is gone, but others may still run from the
+        // mount. This process outlives them, so it keeps the guard for them.
+        let suspend_keeper =
+            guarded_scope.and_then(|scope| suspend_guard::keep(self_exe_name, &tmp_dir, scope));
         if unshare_succeeded {
             restore_capabilities()
         }
@@ -5536,6 +5561,9 @@ fn main() {
             wait_pid_exit(child_pid, Some(Duration::from_secs(1)));
         }
         remove_tmp_dirs(&tmp_dirs, unshare_succeeded);
+        if let Some(keeper) = suspend_keeper {
+            keeper.stop();
+        }
         exit(cleanup_exit_code(cleanup_execution, exit_code))
     }
 }
