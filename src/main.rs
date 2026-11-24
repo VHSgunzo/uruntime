@@ -25,10 +25,10 @@ use std::{
         fs::{symlink, DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt},
         io::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         prelude::PermissionsExt,
-        process::CommandExt,
+        process::{CommandExt, ExitStatusExt},
     },
     path::{Path, PathBuf},
-    process::{exit, Command},
+    process::{exit, Child, Command, ExitStatus},
     str,
     thread::{sleep, spawn},
     time::{self, Duration, Instant},
@@ -3629,6 +3629,55 @@ impl CleanupExecution {
     }
 }
 
+/// The application's process: normally the `Child` of `Command::spawn`.
+enum ApplicationChild {
+    Spawned(Child),
+    Forked(Pid),
+}
+
+impl ApplicationChild {
+    fn id(&self) -> u32 {
+        match self {
+            Self::Spawned(child) => child.id(),
+            Self::Forked(pid) => pid.as_raw() as u32,
+        }
+    }
+
+    fn wait(&mut self) -> Result<ExitStatus> {
+        match self {
+            Self::Spawned(child) => child.wait(),
+            Self::Forked(pid) => loop {
+                let mut status = 0;
+                if unsafe { libc::waitpid(pid.as_raw(), &mut status, 0) } == pid.as_raw() {
+                    return Ok(ExitStatus::from_raw(status));
+                }
+                let err = Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(err);
+                }
+            },
+        }
+    }
+}
+
+/// `Command::spawn` reports an exec failure through an `AF_UNIX` `SOCK_SEQPACKET` socket, which
+/// Linux has only since 2.6.4 (`ESOCKTNOSUPPORT` before). There, fork and `exec` by hand.
+fn spawn_application(command: &mut Command) -> Result<ApplicationChild> {
+    match command.spawn() {
+        Err(err) if err.raw_os_error() == Some(libc::ESOCKTNOSUPPORT) => {
+            match unsafe { fork() }.map_err(Error::from)? {
+                ForkResult::Child => {
+                    let err = command.exec();
+                    eprintln!("Failed to execute {:?}: {err}", command.get_program());
+                    unsafe { libc::_exit(127) }
+                }
+                ForkResult::Parent { child } => Ok(ApplicationChild::Forked(child)),
+            }
+        }
+        result => result.map(ApplicationChild::Spawned),
+    }
+}
+
 fn finish_application_spawn<T>(
     result: Result<T>,
     lifetime_pipe: Option<(OwnedFd, OwnedFd)>,
@@ -5584,8 +5633,10 @@ fn main() {
         }
 
         remove_runtime_separator(&mut exec_args);
-        let (state, spawn_result, lifetime_reader) =
-            finish_application_spawn(run_command.args(&exec_args).spawn(), lifetime_pipe.take());
+        let (state, spawn_result, lifetime_reader) = finish_application_spawn(
+            spawn_application(run_command.args(&exec_args)),
+            lifetime_pipe.take(),
+        );
         application_state = state;
         match spawn_result {
             Ok(mut run_child) => {
