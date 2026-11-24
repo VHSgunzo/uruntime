@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Started the extracted application with fork and `exec` when `Command::spawn` fails with `ESOCKTNOSUPPORT`. `spawn` reports an exec failure over an `AF_UNIX` `SOCK_SEQPACKET` socket, which Linux only has since 2.6.4, so on 2.6.0 to 2.6.3 `AppRun` was never started.
+
 ## [0.8.5] - 2026-11-21
 
 ### Fixed
