@@ -1970,6 +1970,12 @@ fn classify_target_directory(
 }
 
 fn inspect_target_directory(path: &Path) -> TargetDirectoryState {
+    // Look before opening: the 2.6.9 and 2.6.11 kernels of Fedora Core 3 and 4
+    // answer open(O_CLOEXEC) of a path that does not exist with errno 530
+    // instead of ENOENT, which would be taken for an unsafe directory below.
+    if !path_entry_present(path) {
+        return TargetDirectoryState::Empty;
+    }
     let read_result = match fs::read_dir(path) {
         Ok(mut entries) => match entries.next() {
             None => Ok(false),
