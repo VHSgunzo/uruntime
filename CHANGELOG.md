@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Images now extract on Linux kernels before 2.6.16 on x86_64. Those kernels lack `openat` and the other `*at` syscalls that the extractors (libarchive in DwarFS, squashfs-tools) use to create every file. On such a kernel only the extractor runs under [old-linux-kernel-compat-layer](https://github.com/pkgforge-dev/old-linux-kernel-compat-layer), which translates them to the plain calls; the runtime and the application are not traced, and `AppRun` starts its own layer as before. Other kernels only pay one cached `openat` probe.
+
 ## [0.8.5] - 2026-11-21
 
 ### Fixed
