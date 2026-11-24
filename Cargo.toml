@@ -48,6 +48,7 @@ xxhash-rust = { version = "0.8.19", features = [ "xxh3" ] }
 nix = { version = "0.31.3", features = [ "fs", "signal", "mount" ] }
 dotenv = { git = "https://github.com/VHSgunzo/dotenv.git", rev = "367085af80a8d29d2241c85cbfc25736486230c5" }
 memfd-exec = { git = "https://github.com/VHSgunzo/memfd-exec.git", rev = "5a94a9c44f4e8a6ea74ce60d81f9e89c5557b505" }
+old-linux-kernel-compat-layer = { git = "https://github.com/pkgforge-dev/old-linux-kernel-compat-layer", rev = "c8593d17684b6a1bb982e1c58c4cb703993881b4" } # v0.1.1
 
 [target.'cfg(not(target_arch = "x86_64"))'.dependencies]
 zstd = { version = "0.14.4", default-features = false, features = [ "no_asm" ] }

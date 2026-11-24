@@ -358,6 +358,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "old-linux-kernel-compat-layer"
+version = "0.1.1"
+source = "git+https://github.com/pkgforge-dev/old-linux-kernel-compat-layer?rev=c8593d17684b6a1bb982e1c58c4cb703993881b4#c8593d17684b6a1bb982e1c58c4cb703993881b4"
+dependencies = [
+ "nix",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -575,6 +583,7 @@ dependencies = [
  "memfd-exec",
  "nix",
  "num_cpus",
+ "old-linux-kernel-compat-layer",
  "procfs",
  "sha2",
  "signal-hook",

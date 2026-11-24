@@ -4217,7 +4217,7 @@ fn extract_image(
             if let Some(pattern) = pattern {
                 exec_args.append(&mut vec!["--pattern".into(), pattern.to_string()]);
             }
-            embed.dwarfsextract(exec_args)
+            extract_with_compat(|| embed.dwarfsextract(exec_args))
         }
     } else {
         #[cfg(feature = "squashfs")]
@@ -4233,9 +4233,22 @@ fn extract_image(
             if let Some(pattern) = pattern {
                 exec_args.push(pattern.into())
             }
-            embed.unsquashfs(exec_args)
+            extract_with_compat(|| embed.unsquashfs(exec_args))
         }
     }
+}
+
+/// Kernels before 2.6.16 have no `openat` and the other `*at` syscalls, which
+/// the extractors (libarchive, squashfs-tools) use to create every file, so the
+/// image cannot be extracted there. On such a kernel run just the extractor
+/// under the old kernel compatibility layer, which translates them to the plain
+/// calls and ends with the extractor; the runtime and the application stay
+/// untraced (AppRun starts its own layer).
+fn extract_with_compat(extract: impl FnOnce()) {
+    if old_linux_kernel_compat_layer::at_syscalls_missing() {
+        old_linux_kernel_compat_layer::run_traced(extract)
+    }
+    extract()
 }
 
 fn try_set_portable_dir(dir: &PathBuf, env_var: &str, default_path: Option<&str>) {
