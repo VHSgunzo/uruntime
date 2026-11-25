@@ -258,7 +258,9 @@ pub fn generate_fixtures(
         let image = work.path().join(format!("{name}.AppImage"));
         append_files(&image, runtime, filesystem)?;
         let launched = output(
-            Command::new(&image).arg("fixture-image-test"),
+            Command::new(&image)
+                .env("NO_SUSPEND_GUARD", "1")
+                .arg("fixture-image-test"),
             &format!("launch {name} fixture image"),
         )?;
         let launched = String::from_utf8(launched)?;
@@ -660,6 +662,7 @@ fn launch_fuse(image: &Path, state: &Path, label: &str, log: &Path) -> Result<Ch
         .env("TMPDIR", state.join("tmp"))
         .env("URUNTIME_FIXTURE_OUTPUT", state)
         .env("REUSE_CHECK_DELAY", "200ms")
+        .env("NO_SUSPEND_GUARD", "1")
         .args(["--fixture-scenario", "hold", label, SCENARIO_TIMEOUT_MS])
         .stdout(log_file(log)?)
         .stderr(Stdio::from(File::options().append(true).open(log)?));

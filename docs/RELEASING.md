@@ -29,7 +29,7 @@ Record every notable user-visible, compatibility, security, build, and release-p
 
 Prepare `RELEASE_NOTES.md` separately for the release being made. It is a concise, polished public overview: highlight the most important benefits, behavior changes, compatibility notes, and upgrade concerns, then link to `CHANGELOG.md` for the exhaustive technical list. Do not turn release notes into a duplicate of the changelog, and do not omit an important public configuration surface or breaking behavior merely to keep them short.
 
-When launch-mode selection, target naming, mount reuse, namespace transitions, supervisor behavior, exit-status propagation, or cleanup changes, update `docs/APPLICATION_LIFECYCLE.md` in the same change. Keep its overview and detailed Mermaid diagrams, decision tables, fallback matrix, and source map consistent with `src/main.rs`.
+When launch-mode selection, target naming, mount reuse, namespace transitions, supervisor behavior, the suspend guard, exit-status propagation, or cleanup changes, update `docs/APPLICATION_LIFECYCLE.md` in the same change. Keep its overview and detailed Mermaid diagrams, decision tables, fallback matrix, and source map consistent with `src/main.rs`.
 
 The release workflow uses `RELEASE_NOTES.md` verbatim when creating or refreshing the GitHub release, so same-tag reruns do not replace the intended notes with an automation placeholder.
 
