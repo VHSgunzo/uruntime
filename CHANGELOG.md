@@ -17,6 +17,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Lifecycle-harness launches set `NO_SUSPEND_GUARD=1`, so they do not depend on the host's logind.
 
 - Restored per-architecture QEMU smoke execution for all finished foreign runtime artifacts in CI. The full AArch64 Rust quality gate remains commented while its QEMU test-suite cost is investigated.
+## [0.8.5] - 2026-11-21
+
+### Fixed
+
+- Preserved the original invocation name across internal runtime reexecution for no-FUSE extraction fallback and mount retries (#30). AppImage `ARGV0` and RunImage `ARG0` now retain relative paths, symlink names, and caller-supplied `argv[0]` instead of changing to the resolved image path. Retained-inode execution and compatibility-fallback identity checks are unchanged.
+
+## [0.8.4] - 2026-11-19
+
+### Changed
+
+- Updated bundled DwarFS from 0.15.8 to 0.15.10, with refreshed source/payload checksums for all six architectures. This includes upstream fixes for extraction thread cleanup, quadratic hardlink metadata processing, sparse-file progress reporting, and excessive memory allocation on narrow terminals.
+
+## [0.8.3] - 2026-11-14
+
+### Added
+
+- Metadata SquashFS sidecars for DwarFS applications, allowing SquashFS-only thumbnailers and desktop integration tools to read icons and desktop entries (#29). The runtime selects the complete DwarFS payload after a fixed, zero-padded 128 KiB metadata slot; the images are not merged.
+- `URUNTIME_DEBUG_METADATA=1` to report the selected metadata and payload offsets.
+
+### Changed
+
+- Hybrid reusable mount and extraction keys include a full XXH3 hash of the metadata image, so metadata-only changes invalidate reuse. Existing single-image key behavior is preserved.
+
+### Compatibility
+
+- Sidecar selection requires DwarFS support and valid metadata superblock fields, zero padding and a supported DwarFS header. Invalid layouts and builds without DwarFS keep the first SquashFS image. Ordinary single-SquashFS and single-DwarFS layouts remain supported.
+- Public offset values still point to the first filesystem; mount and extraction helpers use the selected payload offset. See [Metadata SquashFS sidecar](docs/METADATA_SIDECAR.md) for builder requirements and size limits.
+
+## [0.8.2] - 2026-11-13
+
+### Changed
+
+- Updated bundled DwarFS to 0.15.8 and squashfuse to 0.6.5, with refreshed source/payload checksums for all six architectures.
+- Refreshed runtime and xtask Rust dependencies.
+- Restored QEMU smoke tests for every foreign release artifact. The expensive full AArch64 Rust quality gate remains disabled.
+- Updated the lifecycle diagrams and cleanup/reuse reference to match the implementation.
+
+### Fixed
+
+- Automatic persistent mounts recover from interrupted PID-record publication by selecting a fresh target, without trusting temporary records or unmounting unverifiable state (#28). Explicit targets, mapping requirements and malformed published records retain strict validation; no configuration changes are required.
+- Pinned memfd-exec 0.2.7 to fix descriptor double-closes and aborts during helper execution without procfs or after a failed exec.
 
 ## [0.8.1] - 2026-09-24
 
@@ -153,6 +194,10 @@ This is a major runtime-safety and compatibility update. It changes how uruntime
 - Generated SquashFS and DwarFS fixtures exclusively with the project-pinned embedded helpers and verified byte-for-byte reproducibility and real bounded application launches.
 - Validated all nine x86_64 and all nine AArch64 release variants, including QEMU execution for AArch64 artifacts.
 
-[Unreleased]: https://github.com/VHSgunzo/uruntime/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/VHSgunzo/uruntime/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/VHSgunzo/uruntime/compare/v0.8.4...v0.8.5
+[0.8.4]: https://github.com/VHSgunzo/uruntime/compare/v0.8.3...v0.8.4
+[0.8.3]: https://github.com/VHSgunzo/uruntime/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/VHSgunzo/uruntime/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/VHSgunzo/uruntime/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/VHSgunzo/uruntime/compare/v0.7.1...v0.8.0
